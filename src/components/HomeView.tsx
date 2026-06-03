@@ -17,6 +17,7 @@ import {
   Sparkles
 } from "lucide-react";
 import { ImportedAsset, PostizAccount, ScheduledPost } from "../types";
+import EditorView from "./EditorView";
 
 export interface HomeViewProps {
   assets: ImportedAsset[];
@@ -169,6 +170,123 @@ export default function HomeView({
   const [isGeneratingFiles, setIsGeneratingFiles] = useState(false);
   const [quickModeFolder, setQuickModeFolder] = useState<{accountName: string, folderName: string} | null>(null);
 
+  // Dynamic state hooks for editor renders
+  const [selectedAccountEditor, setSelectedAccountEditor] = useState(accounts[0]?.id || "");
+  const [scheduledDateEditor, setScheduledDateEditor] = useState("2026-06-03");
+  const [scheduledTimeEditor, setScheduledTimeEditor] = useState("09:00");
+  const [isRenderingSingle, setIsRenderingSingle] = useState(false);
+  const [isConvertingAudio, setIsConvertingAudio] = useState(false);
+
+  // Quick mode configurations
+  const [templateTitle, setTemplateTitle] = useState("Can You Rotate?");
+  const [slidesCount, setSlidesCount] = useState("3");
+  const [batchStartDate, setBatchStartDate] = useState("2026-06-03");
+  const [batchStartTime, setBatchStartTime] = useState("18:00");
+  const [batchInterval, setBatchInterval] = useState("4");
+  const [replacement1, setReplacement1] = useState("Chill... its just a song...");
+  const [replacement2, setReplacement2] = useState("I don't care... TURN IT UP!");
+
+  const handleConvertAudio = async () => {
+    if (!songSearch.trim()) return;
+    setIsConvertingAudio(true);
+    onTriggerNotification?.("Extracting and converting URL to MP3...", "info");
+    try {
+      const res = await fetch("/api/music/convert-mp3", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: songSearch })
+      });
+      if (!res.ok) throw new Error("Conversion failed");
+      const data = await res.json();
+      if (data.success) {
+        setSongSearch(`${data.song.artist} - ${data.song.title}`);
+        onTriggerNotification?.("Audio extracted and loaded into library!", "success");
+      }
+    } catch (err: any) {
+      console.error(err);
+      onTriggerNotification?.(err.message || "Failed to convert audio", "info");
+    } finally {
+      setIsConvertingAudio(false);
+    }
+  };
+
+  const handleRenderSingle = async () => {
+    if (assets.length === 0) {
+      onTriggerNotification?.("No reference video selected. Please import a link first.", "info");
+      return;
+    }
+    const targetAcctId = selectedAccountEditor || accounts[0]?.id;
+    if (!targetAcctId) {
+      onTriggerNotification?.("Please connect at least one account.", "info");
+      return;
+    }
+    setIsRenderingSingle(true);
+    onTriggerNotification?.("Rendering video composition via FFmpeg...", "info");
+    try {
+      const scheduledAtStr = `${scheduledDateEditor}T${scheduledTimeEditor}:00`;
+      const res = await fetch("/api/music/render-single", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          videoUrl: assets[0].videoUrl,
+          songId: "song-1",
+          cropStart: 10,
+          cropEnd: 40,
+          textOverlay: overlays[0]?.text || "",
+          accountId: targetAcctId,
+          scheduledAt: scheduledAtStr
+        })
+      });
+      if (!res.ok) throw new Error("Render pipeline error");
+      const data = await res.json();
+      if (data.success) {
+        onTriggerNotification?.("Manual video rendered and scheduled successfully!", "success");
+        setTimeout(() => window.location.reload(), 1500);
+      }
+    } catch (err: any) {
+      console.error(err);
+      onTriggerNotification?.(err.message || "Failed to render video", "info");
+    } finally {
+      setIsRenderingSingle(false);
+    }
+  };
+
+  const handleStartQuickBatch = async () => {
+    const targetAccount = accounts.find(a => a.name === quickModeFolder?.accountName);
+    if (!targetAccount) return;
+
+    setIsGeneratingFiles(true);
+    onTriggerNotification?.("Orchestrating batch variant renders on server...", "info");
+    try {
+      const res = await fetch(`/api/postiz/accounts/${targetAccount.id}/run-quick-batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          templateTitle,
+          slidesCount: Number(slidesCount),
+          startDate: `${batchStartDate}T${batchStartTime}:00`,
+          intervalHours: Number(batchInterval),
+          songId: "song-1",
+          cropStart: 10,
+          cropEnd: 40,
+          replacements: [replacement1, replacement2]
+        })
+      });
+      if (!res.ok) throw new Error("Batch pipeline error");
+      const data = await res.json();
+      if (data.success) {
+        setQuickModeFolder(null);
+        onTriggerNotification?.(`Successfully scheduled batch for ${quickModeFolder?.folderName}!`, "success");
+        setTimeout(() => window.location.reload(), 1500);
+      }
+    } catch (err: any) {
+      console.error(err);
+      onTriggerNotification?.(err.message || "Failed to start batch", "info");
+    } finally {
+      setIsGeneratingFiles(false);
+    }
+  };
+
   const handleImport = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!urlInput.trim()) return;
@@ -201,15 +319,24 @@ export default function HomeView({
   };
 
   return (
-    <div className="flex h-full w-full overflow-hidden">
-      {/* Left Panel */}
-      <div className="w-[50%] flex flex-col border-r border-[#1C1C1F] bg-[#09090b]">
+    <>
+      {leftTab === 'editor' ? (
+        <EditorView 
+          assets={assets} 
+          accounts={accounts} 
+          onBack={() => setLeftTab('dashboard')}
+          onTriggerNotification={onTriggerNotification} 
+        />
+      ) : (
+        <div className="flex h-full w-full overflow-hidden">
+          {/* Left Panel */}
+          <div className="w-[50%] flex flex-col border-r border-[#1C1C1F] bg-[#09090b]">
         
         {/* Sub Navigation */}
-        <div className="h-11 border-b border-[#1C1C1F] flex items-center px-4 gap-5 shrink-0 bg-[#0c0c0e]">
+        <div className="h-9 border-b border-[#1C1C1F] flex items-center px-4 gap-6 shrink-0 bg-[#050505]">
           <button 
             onClick={() => setLeftTab('dashboard')}
-            className={`h-full flex items-center text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
+            className={`h-full flex items-center text-[9px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
               leftTab === 'dashboard' ? 'border-[#b388ff] text-[#b388ff]' : 'border-transparent text-zinc-500 hover:text-zinc-300'
             }`}
           >
@@ -217,7 +344,7 @@ export default function HomeView({
           </button>
           <button 
             onClick={() => setLeftTab('files')}
-            className={`h-full flex items-center text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
+            className={`h-full flex items-center text-[9px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
               leftTab === 'files' ? 'border-[#b388ff] text-[#b388ff]' : 'border-transparent text-zinc-500 hover:text-zinc-300'
             }`}
           >
@@ -225,7 +352,7 @@ export default function HomeView({
           </button>
           <button 
             onClick={() => setLeftTab('accounts')}
-            className={`h-full flex items-center text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
+            className={`h-full flex items-center text-[9px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
               leftTab === 'accounts' ? 'border-[#b388ff] text-[#b388ff]' : 'border-transparent text-zinc-500 hover:text-zinc-300'
             }`}
           >
@@ -233,24 +360,24 @@ export default function HomeView({
           </button>
           <button 
             onClick={() => setLeftTab('quick')}
-            className={`h-full flex items-center text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
+            className={`h-full flex items-center text-[9px] font-bold uppercase tracking-wider border-b-2 transition-colors ${
               leftTab === 'quick' ? 'border-[#b388ff] text-[#b388ff]' : 'border-transparent text-zinc-500 hover:text-zinc-300'
             }`}
           >
             <div className="flex items-center gap-1.5">
-              <span className="w-[12px] h-[12px] shrink-0 border border-current rounded-[3px] flex items-center justify-center">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="w-[7px] h-[7px]"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              <span className="w-[10px] h-[10px] shrink-0 border border-current rounded-[2px] flex items-center justify-center">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="w-[6px] h-[6px]"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
               </span>
               Quick Mode
             </div>
           </button>
           <button 
             onClick={() => setLeftTab('editor')}
-            className={`h-full flex items-center text-[11px] font-bold uppercase tracking-wider border-b-2 transition-colors ml-auto ${
+            className={`h-full flex items-center text-[9px] font-bold uppercase tracking-wider border-b-2 transition-colors ml-auto ${
               leftTab === 'editor' ? 'border-[#b388ff] text-[#b388ff]' : 'border-transparent text-zinc-500 hover:text-zinc-300'
             }`}
           >
-            Editor <Sparkles className="w-3 h-3 ml-1.5" />
+            Editor <Sparkles className="w-2.5 h-2.5 ml-1.5" />
           </button>
         </div>
 
@@ -298,7 +425,7 @@ export default function HomeView({
                     </div>
                   </div>
                 </div>
-              </div>
+            </div>
             </div>
           )}
 
@@ -347,20 +474,22 @@ export default function HomeView({
               </div>
 
               {/* Grid of Extracted Files */}
-              <div className="grid grid-cols-3 md:grid-cols-4 gap-2.5">
+              <div className="flex flex-wrap gap-5 pt-2">
                 {assets.length === 0 ? (
-                  <div className="col-span-full py-10 text-center text-[10px] uppercase tracking-widest text-zinc-600 font-mono">No assets downloaded.</div>
+                  <div className="w-full py-10 text-center text-[10px] uppercase tracking-widest text-zinc-600 font-mono">No assets downloaded.</div>
                 ) : (
                   assets.map(asset => (
-                    <div key={asset.id} className="group bg-[#111113] border border-[#1f1f22] rounded-md overflow-hidden flex flex-col hover:border-[#3e2376] hover:shadow-[0_0_15px_rgba(179,136,255,0.05)] transition-all cursor-pointer" onClick={() => onQuickLoadToEditor(asset)}>
-                      <div className="aspect-square relative bg-[#050505] overflow-hidden">
-                        <img src={asset.thumbnail} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-700 opacity-70 group-hover:opacity-100" alt="" />
-                        <div className="absolute inset-0 ring-1 ring-inset ring-white/5 pointer-events-none rounded-t-md"></div>
+                    <div key={asset.id} className="w-[72px] group flex flex-col items-center gap-2 cursor-pointer" onClick={() => onQuickLoadToEditor(asset)}>
+                      <div className="w-[72px] h-[72px] rounded-xl bg-[#111113] border border-[#27272a] overflow-hidden relative group-hover:border-[#b388ff] group-hover:ring-2 group-hover:ring-[#b388ff]/20 transition-all shadow-sm">
+                        <img src={asset.thumbnail} className="w-full h-full object-cover opacity-80 group-hover:opacity-100 group-hover:scale-110 transition-all duration-500" alt="" />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="absolute bottom-1.5 right-1.5 w-4 h-4 rounded-md bg-black/60 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-lg">
+                          <ImageIcon className="w-2 h-2 text-zinc-300" />
+                        </div>
                       </div>
-                      <div className="p-2 border-t border-[#1f1f22]">
-                        <h4 className="text-[9px] font-medium text-zinc-300 uppercase truncate font-mono tracking-wider">{asset.title || 'Untitled'}</h4>
-                        <div className="text-[8px] text-zinc-600 mt-0.5 uppercase font-mono tracking-widest">{Math.floor(Math.random() * 200)} ITEMS</div>
-                      </div>
+                      <h4 className="text-[9px] font-mono text-zinc-400 group-hover:text-[#b388ff] text-center w-full truncate px-1 transition-colors leading-tight">
+                        {asset.title || 'Untitled'}
+                      </h4>
                     </div>
                   ))
                 )}
@@ -451,11 +580,21 @@ export default function HomeView({
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <label className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest flex items-center gap-1.5"><FolderOpen className="w-3 h-3" /> Template Title</label>
-                    <input type="text" defaultValue="Can You Rotate?" className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73]" />
+                    <input 
+                      type="text" 
+                      value={templateTitle} 
+                      onChange={(e) => setTemplateTitle(e.target.value)} 
+                      className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73]" 
+                    />
                   </div>
                   <div className="space-y-2">
                     <label className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest flex items-center gap-1.5"><ImageIcon className="w-3 h-3" /> Slides Per Post</label>
-                    <input type="number" defaultValue="3" className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73]" />
+                    <input 
+                      type="number" 
+                      value={slidesCount} 
+                      onChange={(e) => setSlidesCount(e.target.value)} 
+                      className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73]" 
+                    />
                   </div>
                 </div>
 
@@ -464,14 +603,29 @@ export default function HomeView({
                   <label className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest flex items-center gap-1.5"><Check className="w-3 h-3" /> Batch Schedule Start</label>
                   <div className="flex gap-2">
                     <div className="flex-1 relative">
-                      <input type="date" defaultValue="2026-06-03" className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert" />
+                      <input 
+                        type="date" 
+                        value={batchStartDate} 
+                        onChange={(e) => setBatchStartDate(e.target.value)} 
+                        className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert" 
+                      />
                     </div>
                     <div className="flex-1 relative">
-                      <input type="time" defaultValue="18:00" className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert" />
+                      <input 
+                        type="time" 
+                        value={batchStartTime} 
+                        onChange={(e) => setBatchStartTime(e.target.value)} 
+                        className="w-full bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert" 
+                      />
                     </div>
                     <div className="flex-1 bg-[#111113] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:border-[#4c3a73] flex justify-between items-center">
                       <span className="text-zinc-500 font-mono">INTERVAL (HRS)</span>
-                      <span>4</span>
+                      <input 
+                        type="number" 
+                        value={batchInterval} 
+                        onChange={(e) => setBatchInterval(e.target.value)} 
+                        className="w-10 bg-transparent border-0 text-right text-white focus:outline-none p-0" 
+                      />
                     </div>
                   </div>
                 </div>
@@ -511,32 +665,38 @@ export default function HomeView({
                 <div className="space-y-4">
                   <label className="text-[9px] font-mono text-zinc-500 uppercase tracking-widest flex items-center gap-1.5"><Type className="w-3 h-3" /> Text Dynamic Replacement</label>
                   
-                  {[
-                    { id: 1, original: 'Original: "Chill... its just a song..."', text: 'Chill... its just a song...' },
-                    { id: 2, original: 'Original: "I don\'t care... TURN IT UP!"', text: 'I don\'t care... TURN IT UP!!' },
-                  ].map(rep => (
-                    <div key={rep.id} className="relative pt-3">
-                      <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-[#09090b] px-2 text-[8px] font-mono text-zinc-600 uppercase tracking-widest z-10">Replacement Selection {rep.id}</div>
-                      <div className="bg-[#111113] border border-[#27272a] rounded-lg p-4 space-y-2 mt-1">
-                        <div className="text-[9px] text-zinc-500 italic">{rep.original}</div>
-                        <textarea rows={2} defaultValue={rep.text} className="w-full bg-[#09090b] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] resize-none" />
-                      </div>
+                  <div className="relative pt-3">
+                    <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-[#09090b] px-2 text-[8px] font-mono text-zinc-600 uppercase tracking-widest z-10">Replacement Selection 1</div>
+                    <div className="bg-[#111113] border border-[#27272a] rounded-lg p-4 space-y-2 mt-1">
+                      <div className="text-[9px] text-zinc-500 italic">Original: "Chill... its just a song..."</div>
+                      <textarea 
+                        rows={2} 
+                        value={replacement1} 
+                        onChange={(e) => setReplacement1(e.target.value)} 
+                        className="w-full bg-[#09090b] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] resize-none" 
+                      />
                     </div>
-                  ))}
+                  </div>
+
+                  <div className="relative pt-3">
+                    <div className="absolute top-0 left-1/2 -translate-x-1/2 bg-[#09090b] px-2 text-[8px] font-mono text-zinc-600 uppercase tracking-widest z-10">Replacement Selection 2</div>
+                    <div className="bg-[#111113] border border-[#27272a] rounded-lg p-4 space-y-2 mt-1">
+                      <div className="text-[9px] text-zinc-500 italic">Original: "I don't care... TURN IT UP!"</div>
+                      <textarea 
+                        rows={2} 
+                        value={replacement2} 
+                        onChange={(e) => setReplacement2(e.target.value)} 
+                        className="w-full bg-[#09090b] border border-[#27272a] rounded-[4px] p-2.5 text-[11px] text-white focus:outline-none focus:border-[#4c3a73] resize-none" 
+                      />
+                    </div>
+                  </div>
                 </div>
 
                 {/* Submitting Action */}
                 <div className="pt-4 flex justify-end gap-3 border-t border-[#1f1f22]">
                   <button onClick={() => setQuickModeFolder(null)} className="px-6 py-2.5 text-[10px] font-bold uppercase tracking-wider text-zinc-400 hover:text-white transition-colors">Cancel</button>
                   <button 
-                    onClick={() => {
-                      setIsGeneratingFiles(true);
-                      setTimeout(() => {
-                        setIsGeneratingFiles(false);
-                        setQuickModeFolder(null); // Return to accounts view
-                        onTriggerNotification?.(`Successfully scheduled batch for ${quickModeFolder.folderName}!`, "success");
-                      }, 3000);
-                    }}
+                    onClick={handleStartQuickBatch}
                     disabled={isGeneratingFiles}
                     className="bg-[#b388ff] text-[#1f1635] text-[10px] font-bold uppercase tracking-wider px-6 py-2.5 rounded-[4px] hover:bg-[#a67ceb] transition-colors flex items-center gap-2 disabled:opacity-50"
                   >
@@ -632,18 +792,11 @@ export default function HomeView({
                         )}
                       </div>
                       <button 
-                        onClick={() => {
-                          if (songSearch.includes('youtube.com') || songSearch.includes('youtu.be') || songSearch.includes('tiktok.com')) {
-                             onTriggerNotification?.("Extracting MP3 from URL...", "info");
-                             setTimeout(() => {
-                               setSongSearch("Extracted: " + songSearch.split('/').pop());
-                               onTriggerNotification?.("Audio extracted and loaded!", "success");
-                             }, 3000);
-                          }
-                        }}
-                        className="px-3 bg-[#111113] border border-[#27272a] text-zinc-300 rounded-[6px] text-[10px] font-bold tracking-wider hover:bg-[#1f1f22] hover:text-white whitespace-nowrap transition-colors uppercase"
+                        onClick={handleConvertAudio}
+                        disabled={isConvertingAudio}
+                        className="px-3 bg-[#111113] border border-[#27272a] text-zinc-300 rounded-[6px] text-[10px] font-bold tracking-wider hover:bg-[#1f1f22] hover:text-white whitespace-nowrap transition-colors uppercase disabled:opacity-50"
                       >
-                        Convert MP3
+                        {isConvertingAudio ? 'Converting...' : 'Convert MP3'}
                       </button>
                     </div>
                   </div>
@@ -742,6 +895,63 @@ export default function HomeView({
                   </div>
                 </div>
 
+                {/* Rendering & Scheduling Controls */}
+                <div className="bg-[#0c0c0e] border border-[#1f1f22] rounded-lg p-3 space-y-3 pt-4 border-t-2 border-t-[#b388ff]/10">
+                  <div className="text-[10px] font-bold text-white uppercase tracking-widest">Render & Schedule Destination</div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[8px] uppercase font-mono tracking-wider text-zinc-500">Destination Account</label>
+                      <select 
+                        value={selectedAccountEditor} 
+                        onChange={(e) => setSelectedAccountEditor(e.target.value)} 
+                        className="w-full bg-[#050505] border border-[#27272a] rounded-[6px] px-2.5 py-1.5 text-[10px] text-zinc-300 focus:outline-none focus:border-[#4c3a73]"
+                      >
+                        {accounts.map(a => (
+                          <option key={a.id} value={a.id}>{a.handle} ({a.type})</option>
+                        ))}
+                      </select>
+                    </div>
+                    
+                    <div className="space-y-1">
+                      <label className="text-[8px] uppercase font-mono tracking-wider text-zinc-500">Schedule Date</label>
+                      <input 
+                        type="date" 
+                        value={scheduledDateEditor} 
+                        onChange={(e) => setScheduledDateEditor(e.target.value)} 
+                        className="w-full bg-[#050505] border border-[#27272a] rounded-[6px] px-2.5 py-1 text-[10px] text-zinc-300 focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert"
+                      />
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[8px] uppercase font-mono tracking-wider text-zinc-500">Schedule Time</label>
+                      <input 
+                        type="time" 
+                        value={scheduledTimeEditor} 
+                        onChange={(e) => setScheduledTimeEditor(e.target.value)} 
+                        className="w-full bg-[#050505] border border-[#27272a] rounded-[6px] px-2.5 py-1.5 text-[10px] text-zinc-300 focus:outline-none focus:border-[#4c3a73] [&::-webkit-calendar-picker-indicator]:invert"
+                      />
+                    </div>
+                    
+                    <div className="flex items-end">
+                      <button 
+                        onClick={handleRenderSingle}
+                        disabled={isRenderingSingle}
+                        className="w-full bg-[#b388ff] hover:bg-[#a67ceb] disabled:bg-[#1f1f22] disabled:text-zinc-600 text-[#1f1635] font-bold text-[10px] uppercase tracking-wider py-2 rounded-[4px] transition-colors flex items-center justify-center gap-2 disabled:opacity-50"
+                      >
+                        {isRenderingSingle ? (
+                          <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <Sparkles className="w-3.5 h-3.5" />
+                        )}
+                        {isRenderingSingle ? "Rendering..." : "Generate & Schedule"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
               </div>
             </div>
           )}
@@ -825,5 +1035,7 @@ export default function HomeView({
       </div>
 
     </div>
+    )}
+    </>
   );
 }

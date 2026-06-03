@@ -20,6 +20,7 @@ import CalendarView from "./components/CalendarView";
 import { ImportedAsset, PostizAccount, PostizConfig, ScheduledPost } from "./types";
 import QueueModal from "./components/QueueModal";
 import SettingsModal from "./components/SettingsModal";
+import MobileAppView from "./components/Mobile/MobileAppView";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'home' | 'calendar'>('home');
@@ -40,9 +41,16 @@ export default function App() {
   const [isLoadingAssets, setIsLoadingAssets] = useState(false);
   const [isScrapingLink, setIsScrapingLink] = useState(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
+  
+  // Mobile Support
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
 
   useEffect(() => {
     loadAllData();
+    
+    const handleResize = () => setIsMobile(window.innerWidth < 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   const loadAllData = async () => {
@@ -176,6 +184,85 @@ export default function App() {
     triggerNotification(`Opened "${asset.title}"!`, "success");
   };
 
+  const handleSaveSettings = async (key: string) => {
+    try {
+      const res = await fetch("/api/postiz/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: key,
+          useRealPostiz: !!key
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPostizConfig(data.config);
+        triggerNotification("Settings successfully saved.", "success");
+        await loadAllData();
+      } else {
+        triggerNotification("Failed to save configuration.", "info");
+      }
+    } catch (err) {
+      console.error("Error saving config:", err);
+      triggerNotification("Failed to connect to backend config.", "info");
+    }
+  };
+
+  if (isMobile) {
+    return (
+      <>
+        {/* Toast Notification for Mobile */}
+        {notification && (
+          <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[200] max-w-[90%] w-full bg-[#1A1A1C] text-white rounded shadow-xl border border-[#333] p-4 flex items-start gap-3 animate-slide-in">
+            {notification.type === 'success' ? (
+              <CheckCircle2 className="h-5 w-5 text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <AlertCircle className="h-5 w-5 text-purple-400 shrink-0 mt-0.5" />
+            )}
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                {notification.type === 'success' ? "Operation Success" : "System Alert"}
+              </p>
+              <p className="text-xs text-slate-200 mt-1 leading-relaxed">
+                {notification.message}
+              </p>
+            </div>
+          </div>
+        )}
+        <MobileAppView 
+          assets={assets}
+          accounts={accounts}
+          scheduledPosts={scheduledPosts}
+          onImportLink={handleImportLink}
+          onDeleteAsset={handleDeleteAsset}
+          isLoadingAsset={isLoadingAssets || isScrapingLink}
+          onUpdateAccount={handleUpdateAccount}
+          onRunAgent={handleRunAgent}
+          onAddScheduledPost={handleAddScheduledPost}
+          onTriggerNotification={triggerNotification}
+          onUpdatePostSchedule={handleUpdatePostSchedule}
+          onDeletePost={handleDeletePost}
+          setIsSettingsOpen={setIsSettingsOpen}
+          setIsQueueModalOpen={setIsQueueModalOpen}
+        />
+        
+        <QueueModal 
+          isOpen={isQueueModalOpen} 
+          onClose={() => setIsQueueModalOpen(false)} 
+          accountsCount={accounts.length}
+          postsCount={scheduledPosts.length}
+        />
+
+        <SettingsModal 
+          isOpen={isSettingsOpen}
+          onClose={() => setIsSettingsOpen(false)}
+          currentApiKey={postizConfig.apiKey}
+          onSave={handleSaveSettings}
+        />
+      </>
+    );
+  }
+
   return (
     <div style={{ transform: "scale(0.8)", transformOrigin: "top left", width: "125vw", height: "125vh" }} className="absolute text-zinc-200 flex flex-col font-sans antialiased selection:bg-purple-500/20 selection:text-purple-400 overflow-hidden bg-[#09090B]">
       
@@ -199,89 +286,63 @@ export default function App() {
       )}
 
       {/* Main Minimalist Header */}
-      <header className="bg-[#050505] shrink-0 flex flex-col w-full z-20">
-        {/* Top Row */}
-        <div className="h-10 flex items-center justify-between px-4 border-b border-[#1C1C1F]">
-          {/* Left: Logo & Nav */}
-          <div className="flex items-center gap-5">
+      <header className="bg-[#050505] shrink-0 flex w-full z-20 items-center justify-between px-4 h-12 border-b border-[#1C1C1F]">
+        {/* Left: Logo, Nav, & Stats */}
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
             <div className="w-6 h-6 rounded-sm border border-zinc-800 flex items-center justify-center shrink-0 shadow-sm bg-[#111113]">
               <Sparkles className="w-3 h-3 text-[#b388ff]" />
             </div>
-            <nav className="flex items-center gap-1">
-              <button
-                onClick={() => setActiveTab('home')}
-                className={`flex items-center gap-1.5 px-2.5 h-7 text-[10px] font-medium rounded-md transition-all uppercase tracking-wider ${
-                  activeTab === 'home' ? 'text-white bg-[#111113] border border-[#1f1f22]' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
-                }`}
-              >
-                <HomeIcon className="w-3 h-3" /> Home
-              </button>
-              <button
-                onClick={() => setActiveTab('calendar')}
-                className={`flex items-center gap-1.5 px-2.5 h-7 text-[10px] font-medium rounded-md transition-all uppercase tracking-wider ${
-                  activeTab === 'calendar' ? 'text-white bg-[#111113] border border-[#1f1f22]' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
-                }`}
-              >
-                <CalendarIcon className="w-3 h-3" /> Calendar
-              </button>
-            </nav>
-          </div>
-
-          {/* Right: Queue & Profile */}
-          <div className="flex items-center gap-4">
-             <button 
-                onClick={() => setIsQueueModalOpen(true)}
-                className="flex items-center justify-center gap-1.5 px-2.5 h-6 bg-[#1f1635] text-[#b388ff] text-[9px] font-medium uppercase tracking-widest rounded-md hover:bg-[#2a1d47] transition border border-[#3e2376]/50"
-             >
-               <ListIcon className="w-2.5 h-2.5" /> Queue
-               <span className="bg-[#b388ff] text-[#1f1635] text-[8px] font-bold px-1 py-0.5 rounded-[3px] leading-none">{scheduledPosts.length}</span>
-             </button>
-             <div className="flex items-center gap-2.5 pl-2 border-l border-[#1C1C1F]">
-               <div className="text-right">
-                 <div className="text-[9px] font-bold text-white uppercase tracking-wider">ptnmgmt</div>
-                 <div className="text-[7px] text-zinc-500 mt-0.5 uppercase font-mono tracking-widest">Pro Plan</div>
-               </div>
-               <button 
-                 onClick={() => setIsSettingsOpen(true)}
-                 className="w-6 h-6 flex items-center justify-center bg-[#111113] border border-[#1f1f22] rounded-md text-zinc-400 hover:text-white transition shadow-sm"
-                 title="Settings"
-               >
-                 <Settings className="w-3 h-3" />
-               </button>
-               <button className="w-6 h-6 flex items-center justify-center bg-[#111113] border border-[#1f1f22] rounded-md text-zinc-400 hover:text-white transition shadow-sm">
-                 <LogOut className="w-3 h-3" />
-               </button>
-             </div>
-          </div>
-        </div>
-
-        {/* Sub Banner - Luxury Stats Card */}
-        <div className="h-9 px-4 bg-[#09090B] border-b border-[#1C1C1F] flex items-center justify-between">
-          
-          <div className="flex items-center space-x-2">
-            <div className="flex items-center bg-[#050505] border border-[#1f1f22] rounded-md px-2.5 py-1.5 shadow-sm space-x-3">
-              <div className="flex items-center gap-1.5">
-                <div className="w-1 h-1 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div>
-                <span className="text-[9px] font-mono uppercase tracking-widest text-[#b388ff]">Automator Online</span>
-              </div>
-              <div className="w-[1px] h-3 bg-zinc-800"></div>
-              <div className="flex items-center gap-3">
-                <div className="text-left font-mono">
-                   <div className="text-[9px] font-medium text-zinc-300 uppercase tracking-widest">{assets.length} Files</div>
-                </div>
-                <div className="w-[1px] h-3 bg-zinc-800"></div>
-                <div className="text-left font-mono">
-                   <div className="text-[9px] font-medium text-zinc-300 uppercase tracking-widest">{accounts.length} Accounts</div>
-                </div>
-                <div className="w-[1px] h-3 bg-zinc-800"></div>
-                <div className="text-left font-mono">
-                   <div className="text-[9px] font-bold text-[#b388ff] uppercase tracking-widest">{scheduledPosts.length} Slots Filled</div>
-                </div>
-              </div>
+            <div className="flex items-center gap-2">
+              <div className="w-1.5 h-1.5 rounded-full bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]"></div>
+              <span className="text-[10px] font-mono uppercase tracking-widest text-zinc-300">Automator Online</span>
             </div>
           </div>
           
-          <div className="text-[9px] font-mono text-zinc-600 uppercase tracking-widest">v2.0.0</div>
+          <div className="w-px h-4 bg-zinc-800"></div>
+
+          <nav className="flex items-center gap-2">
+            <button
+              onClick={() => setActiveTab('home')}
+              className={`flex items-center gap-1.5 px-3 h-7 text-[10px] font-bold rounded-full transition-all uppercase tracking-wider ${
+                activeTab === 'home' ? 'text-white bg-[#111113] border border-[#1f1f22]' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
+              }`}
+            >
+              <HomeIcon className="w-3 h-3" /> Home
+            </button>
+            <button
+              onClick={() => setActiveTab('calendar')}
+              className={`flex items-center gap-1.5 px-3 h-7 text-[10px] font-bold rounded-full transition-all uppercase tracking-wider ${
+                activeTab === 'calendar' ? 'text-white bg-[#111113] border border-[#1f1f22]' : 'text-zinc-500 hover:text-zinc-300 border border-transparent'
+              }`}
+            >
+              <CalendarIcon className="w-3 h-3" /> Calendar
+            </button>
+          </nav>
+        </div>
+
+        {/* Right: Queue & Profile */}
+        <div className="flex items-center gap-4">
+           <button 
+              onClick={() => setIsQueueModalOpen(true)}
+              className="flex items-center justify-center gap-1.5 px-3 h-7 bg-[#1f1635] text-[#b388ff] text-[9px] font-bold uppercase tracking-widest rounded-full hover:bg-[#2a1d47] transition border border-[#3e2376]/50"
+           >
+             <ListIcon className="w-2.5 h-2.5" /> Queue
+             <span className="bg-[#b388ff] text-[#1f1635] text-[8px] font-bold px-1.5 py-0.5 rounded-full leading-none">{scheduledPosts.length}</span>
+           </button>
+           <div className="flex items-center gap-3 pl-3 border-l border-[#1C1C1F]">
+             <div className="text-right">
+               <div className="text-[9px] font-bold text-white uppercase tracking-wider">ptnmgmt</div>
+               <div className="text-[7px] text-zinc-500 mt-0.5 uppercase font-mono tracking-widest">Pro Plan</div>
+             </div>
+             <button 
+               onClick={() => setIsSettingsOpen(true)}
+               className="w-7 h-7 flex items-center justify-center bg-[#111113] border border-[#1f1f22] rounded-full text-zinc-400 hover:text-white transition shadow-sm"
+               title="Settings"
+             >
+               <Settings className="w-3.5 h-3.5" />
+             </button>
+           </div>
         </div>
       </header>
 
@@ -330,10 +391,7 @@ export default function App() {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         currentApiKey={postizConfig.apiKey}
-        onSave={(key) => {
-          setPostizConfig(prev => ({ ...prev, apiKey: key, useRealPostiz: !!key }));
-          triggerNotification("Settings successfully saved.", "success");
-        }}
+        onSave={handleSaveSettings}
       />
     </div>
   );

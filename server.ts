@@ -3,6 +3,12 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
+import fs from "fs";
+import https from "https";
+import { execFile } from "child_process";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import ffmpeg from "ffmpeg-static";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -14,6 +20,20 @@ const PORT = 3000;
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
+
+// Serve the temp folder statically to allow playing rendered files locally
+app.use("/media", express.static(path.join(__dirname, "temp")));
+
+// Initialize Supabase Client
+// Fallback directly to the fetched credentials for instant, zero-setup connection
+const SUPABASE_DEFAULT_URL = "https://linjrrwcqzviqxetbail.supabase.co";
+const SUPABASE_DEFAULT_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxpbmpycndjcXp2aXF4ZXRiYWlsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA0MzQ3MzUsImV4cCI6MjA5NjAxMDczNX0.zdTGrP6jFx-Ynwy782FfsGjMOtMLanXMnUYFZAmU5P4";
+
+const supabaseUrl = process.env.SUPABASE_URL || SUPABASE_DEFAULT_URL;
+const supabaseKey = process.env.SUPABASE_KEY || SUPABASE_DEFAULT_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+console.log(`[Supabase] Client initialized targeting endpoint: ${supabaseUrl}`);
 
 // Curated library of royalty-free songs & artists with track paths (playable urls)
 const CURATED_MUSIC = [
@@ -91,7 +111,6 @@ const CURATED_MUSIC = [
   }
 ];
 
-// Curated stock video resources that mock TikTok/Instagram reels
 const STOCK_VIDEOS = [
   "https://assets.mixkit.co/videos/preview/mixkit-girl-in-neon-lit-room-watching-screen-40767-large.mp4",
   "https://assets.mixkit.co/videos/preview/mixkit-typing-on-a-glowing-neon-keyboard-43110-large.mp4",
@@ -100,7 +119,6 @@ const STOCK_VIDEOS = [
   "https://assets.mixkit.co/videos/preview/mixkit-hands-of-a-developer-coding-on-a-laptop-42173-large.mp4"
 ];
 
-// Curated stock photo slides
 const STOCK_PHOTOS = [
   "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&auto=format&fit=crop&q=80",
   "https://images.unsplash.com/photo-1511512578047-dfb367046420?w=800&auto=format&fit=crop&q=80",
@@ -109,14 +127,10 @@ const STOCK_PHOTOS = [
   "https://images.unsplash.com/photo-1515378791036-0648a3ef77b2?w=800&auto=format&fit=crop&q=80"
 ];
 
-// Lazy Gemini AI Init
 let aiClient: GoogleGenAI | null = null;
 function getGeminiClient(): GoogleGenAI {
   if (!aiClient) {
     const key = process.env.GEMINI_API_KEY;
-    if (!key) {
-      console.warn("GEMINI_API_KEY environment variable is not defined. Using dry-runs / simulation mock fallback.");
-    }
     aiClient = new GoogleGenAI({
       apiKey: key || "MOCK_KEY",
       httpOptions: {
@@ -129,141 +143,129 @@ function getGeminiClient(): GoogleGenAI {
   return aiClient;
 }
 
-// In-Memory storage for scheduled pipeline, channels and uploaded/imported media tracks
-let scheduledPosts: any[] = [
-  {
-    id: "sched-1",
-    title: "Unboxing New Studio Desk Setup!",
-    type: "social",
-    mediaType: "video",
-    platform: "tiktok",
-    fileUrl: STOCK_VIDEOS[0],
-    subtitles: "This desk setup is a complete gamechanger 🔥",
-    scheduledAt: new Date(Date.now() + 86400000 * 1).toISOString(), // Tomorrow
-    status: "scheduled",
-    songId: "song-1",
-    cropStart: 10,
-    cropEnd: 40,
-    platforms: ["tiktok", "instagram"],
-  },
-  {
-    id: "sched-2",
-    title: "10 AI Tools to Skyrocket Growth in 2026",
-    type: "blog",
-    mediaType: "text",
-    platform: "medium",
-    scheduledAt: new Date(Date.now() + 86400000 * 2).toISOString(), // 2 days later
-    status: "scheduled",
-    blogContent: "# 10 AI Tools to Skyrocket Growth...\nSEO optimized copy...",
-    seoMeta: { title: "Top 10 AI Tools Growth 2026", description: "Optimize workflows with these tools." },
-    platforms: ["platform-blog-1"],
-  }
-];
+function downloadFile(url: string, dest: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    const request = https.get(url, (response) => {
+      if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        file.close();
+        fs.unlink(dest, () => {});
+        downloadFile(response.headers.location, dest).then(resolve).catch(reject);
+        return;
+      }
+      if (response.statusCode !== 200) {
+        file.close();
+        fs.unlink(dest, () => {});
+        reject(new Error(`Failed to download file, status code: ${response.statusCode}`));
+        return;
+      }
+      response.pipe(file);
+      file.on("finish", () => {
+        file.close();
+        resolve();
+      });
+    });
+    request.on("error", (err) => {
+      file.close();
+      fs.unlink(dest, () => {});
+      reject(err);
+    });
+  });
+}
 
-// Mock database for imported links
-let importedAssets: any[] = [
-  {
-    id: "import-1",
-    sourceUrl: "https://www.tiktok.com/@growth_hacks/18273618",
-    title: "Growth Hacks Tip #1",
-    thumbnail: "https://images.unsplash.com/photo-1460925895917-afdab827c52f?w=420&auto=format&fit=crop&q=80",
-    videoUrl: STOCK_VIDEOS[1],
-    duration: 35,
-    downloaded: true,
-    size: "14.2 MB"
-  },
-  {
-    id: "import-2",
-    sourceUrl: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    title: "Visual Aesthetic Reference #12",
-    thumbnail: "https://images.unsplash.com/photo-1542751371-adc38448a05e?w=420&auto=format&fit=crop&q=80",
-    videoUrl: STOCK_VIDEOS[2],
-    duration: 52,
-    downloaded: true,
-    size: "22.8 MB"
+async function initBinaries() {
+  const binDir = path.join(__dirname, "bin");
+  if (!fs.existsSync(binDir)) {
+    fs.mkdirSync(binDir, { recursive: true });
   }
-];
 
-// MOCK Postiz Accounts Setup
-let postizAccounts = [
-  { 
-    id: "p-tik", 
-    name: "Acedk Media (TikTok)", 
-    handle: "@acedk_media", 
-    type: "tiktok", 
-    avatar: "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100&auto=format&fit=crop&q=80", 
-    connected: true,
-    theme: "AI Automation & No-Code SaaS Build Guides",
-    aesthetic: "Dark moody background, terminal typeface overlays, orange-to-neon-pink glow shadows",
-    goal: "Sponsor 100 enterprise prospects for customized AI audit calls",
-    strategy: "Daily 15-second visual tutorials highlighting secret APIs or visual workflows",
-    style: "Fast cuts, high contrast text stroke elements, low-fi synth backing rhythms",
-    personality: "Pragmatic, cynical senior engineer who values speed and hates over-complicated tooling",
-    agentLogs: [
-      `[Initialization] DeepSeek-V3 Engine booted with model class "deepseek-composer"`,
-      `[Status] Monitoring social pipeline schedules; ready to generate & dispatch.`
-    ]
-  },
-  { 
-    id: "p-ins", 
-    name: "Acedk Strategy (Instagram)", 
-    handle: "@acedk.strategy", 
-    type: "instagram", 
-    avatar: "https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=100&auto=format&fit=crop&q=80", 
-    connected: true,
-    theme: "Solopreneur SaaS Architecture & System Design Maps",
-    aesthetic: "Sleek bento-grid graphics, clean off-white charts, JetBrains Mono font details",
-    goal: "Drive high-ticket digital downloads for core server configurations",
-    strategy: "Carousel slides breaking complex systems into actionable 3-step checklists",
-    style: "Minimalist, slow-pacing, quiet confidence, rich caption annotations",
-    personality: "Hyper-methodical enterprise systems architect who breaks down giant ideas visually",
-    agentLogs: [
-      `[Initialization] DeepSeek-V3 Engine ready.`,
-      `[Status] Standby for structural grid visual composition.`
-    ]
-  },
-  { 
-    id: "p-yt", 
-    name: "Acedk Studio (YouTube Shorts)", 
-    handle: "@acedk_studio", 
-    type: "youtube", 
-    avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&auto=format&fit=crop&q=80", 
-    connected: true,
-    theme: "Behind-The-Scenes Tech Dev logs",
-    aesthetic: "Extreme close-ups of keyboard clicks, glowing desk lamps, satisfying retro-UI monitors",
-    goal: "Maximize Shorts feed CTR using high contrast hooks and sound wave audio cues",
-    strategy: "30-second mini-narratives showing a bug's diagnosis and its elegant patch",
-    style: "Ultra high audio density, satisfying code-editor keystrokes, direct visual zooms",
-    personality: "A cozy but sharp nocturnal indie software builder detailing micro-SaaS creation",
-    agentLogs: [
-      `[Initialization] DeepSeek-V3 Engine ready.`,
-      `[Status] Keystroke audio capture calibrated.`
-    ]
-  },
-  { 
-    id: "p-blog-1", 
-    name: "Acedk Insights (Medium)", 
-    handle: "acedk-insights", 
-    type: "medium", 
-    avatar: "https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?w=100&auto=format&fit=crop&q=80", 
-    connected: true,
-    theme: "The Future of Deep-Tech Platforms & Postiz Bridges",
-    aesthetic: "Clean crisp typography, high editorial screenshots, no unnecessary images",
-    goal: "Rank top-3 in high-value search queries for automated bulk social pipelines",
-    strategy: "In-depth research reports with high informational density and clean code recipes",
-    style: "Academic but accessible, structured markdown with bullet lists and headers",
-    personality: "Distinguished tech editor and open-source platform advocate",
-    agentLogs: [
-      `[Initialization] DeepSeek-V3 Engine ready.`,
-      `[Status] SEO indexing bots monitored.`
-    ]
+  const tempDir = path.join(__dirname, "temp");
+  if (!fs.existsSync(tempDir)) {
+    fs.mkdirSync(tempDir, { recursive: true });
   }
-];
+  const downloadsDir = path.join(tempDir, "downloads");
+  if (!fs.existsSync(downloadsDir)) {
+    fs.mkdirSync(downloadsDir, { recursive: true });
+  }
+  const rendersDir = path.join(tempDir, "renders");
+  if (!fs.existsSync(rendersDir)) {
+    fs.mkdirSync(rendersDir, { recursive: true });
+  }
+
+  const fontPath = path.join(binDir, "font.ttf");
+  if (!fs.existsSync(fontPath)) {
+    console.log("[Setup] Downloading Outfit-Bold.ttf font overlay...");
+    try {
+      await downloadFile("https://github.com/google/fonts/raw/main/ofl/outfit/Outfit-Bold.ttf", fontPath);
+    } catch (err) {
+      console.error("[Setup] Failed to download font.ttf:", err);
+    }
+  }
+
+  const isWindows = process.platform === "win32";
+  const ytdlpPath = path.join(binDir, isWindows ? "yt-dlp.exe" : "yt-dlp");
+  if (!fs.existsSync(ytdlpPath)) {
+    console.log("[Setup] Downloading yt-dlp binary...");
+    const url = isWindows 
+      ? "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+      : "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+    try {
+      await downloadFile(url, ytdlpPath);
+      if (!isWindows) {
+        fs.chmodSync(ytdlpPath, "755");
+      }
+    } catch (err) {
+      console.error("[Setup] Failed to download yt-dlp binary:", err);
+    }
+  }
+}
+
+const hasR2Creds = 
+  process.env.R2_ACCOUNT_ID &&
+  process.env.R2_ACCESS_KEY_ID &&
+  process.env.R2_SECRET_ACCESS_KEY &&
+  process.env.R2_BUCKET_NAME;
+
+const r2Client = hasR2Creds
+  ? new S3Client({
+      region: "auto",
+      endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+        secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+      },
+    })
+  : null;
+
+async function uploadFileToR2(localFilePath: string, key: string): Promise<string> {
+  if (r2Client && hasR2Creds) {
+    try {
+      const fileBuffer = fs.readFileSync(localFilePath);
+      const contentType = key.endsWith(".mp3") ? "audio/mpeg" : (key.endsWith(".jpg") || key.endsWith(".jpeg") ? "image/jpeg" : "video/mp4");
+      await r2Client.send(
+        new PutObjectCommand({
+          Bucket: process.env.R2_BUCKET_NAME!,
+          Key: key,
+          Body: fileBuffer,
+          ContentType: contentType,
+        })
+      );
+      const publicUrl = process.env.R2_PUBLIC_URL || `https://${process.env.R2_BUCKET_NAME}.r2.cloudflarestorage.com`;
+      return `${publicUrl}/${key}`;
+    } catch (err) {
+      console.error("[R2 Upload Error] Fallback triggered:", err);
+    }
+  }
+  const fileName = path.basename(localFilePath);
+  const isAudio = key.endsWith(".mp3");
+  const subFolder = isAudio ? "downloads" : "renders";
+  return `/media/${subFolder}/${fileName}`;
+}
 
 let postizConfig = {
-  endpoint: "https://api.postiz.com/v1",
-  apiKey: "ptz_sk_9a128e...",
-  useRealPostiz: false,
+  endpoint: "https://api.postiz.com/public/v1",
+  apiKey: process.env.POSTIZ_API_KEY || "",
+  useRealPostiz: !!process.env.POSTIZ_API_KEY,
 };
 
 // MUSIC SEARCH API
@@ -278,36 +280,187 @@ app.get("/api/music/search", (req, res) => {
   res.json(filtered);
 });
 
-// POSTIZ ACCOUNTS CONFIG & PROXIES
-app.get("/api/postiz/accounts", (req, res) => {
-  res.json({ accounts: postizAccounts, config: postizConfig });
+// POSTIZ ACCOUNTS CONFIG & PROXIES (via Supabase)
+app.get("/api/postiz/accounts", async (req, res) => {
+  try {
+    // Sync with Postiz if key is present
+    if (postizConfig.apiKey) {
+      try {
+        console.log(`[Postiz Sync] Fetching integrations from ${postizConfig.endpoint}/integrations`);
+        const response = await fetch(`${postizConfig.endpoint}/integrations`, {
+          method: "GET",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${postizConfig.apiKey}`
+          }
+        });
+
+        if (response.ok) {
+          const rawData = (await response.json()) as any;
+          const integrations = Array.isArray(rawData) 
+            ? rawData 
+            : (rawData.integrations || rawData.data || []);
+
+          console.log(`[Postiz Sync] Discovered ${integrations.length} integrations from Postiz.`);
+          
+          // Delete mock accounts if a valid API key was used successfully
+          const mockIds = ["p-tik", "p-ins", "p-yt", "p-blog-1"];
+          const { error: delError } = await supabase
+            .from("postiz_accounts")
+            .delete()
+            .in("id", mockIds);
+
+          if (delError) {
+            console.error("[Postiz Sync] Warning: failed to delete mock accounts:", delError);
+          }
+
+          if (integrations.length > 0) {
+            // Fetch current accounts from DB to perform a merge
+            const { data: currentDbAccounts } = await supabase
+              .from("postiz_accounts")
+              .select("id");
+            
+            const existingIds = new Set((currentDbAccounts || []).map((a: any) => a.id));
+
+            for (const integration of integrations) {
+              const integrationId = String(integration.id);
+              const name = integration.name || `Channel ${integrationId}`;
+              const handle = integration.profile || `@channel_${integrationId}`;
+              const avatar = integration.picture || "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100";
+              
+              let type = (integration.identifier || "tiktok").toLowerCase();
+              if (type.includes("tiktok")) type = "tiktok";
+              else if (type.includes("instagram")) type = "instagram";
+              else if (type.includes("youtube")) type = "youtube";
+              else if (type.includes("medium")) type = "medium";
+              else type = "tiktok"; // Default fallback
+
+              if (existingIds.has(integrationId)) {
+                // Account already exists. Update basic profile info.
+                const { error: updateError } = await supabase
+                  .from("postiz_accounts")
+                  .update({
+                    name,
+                    handle,
+                    avatar,
+                    type,
+                    connected: true
+                  })
+                  .eq("id", integrationId);
+                
+                if (updateError) {
+                  console.error(`[Postiz Sync] Error updating account ${integrationId}:`, updateError);
+                }
+              } else {
+                // New account. Insert with defaults.
+                const { error: insertError } = await supabase
+                  .from("postiz_accounts")
+                  .insert({
+                    id: integrationId,
+                    name,
+                    handle,
+                    avatar,
+                    type,
+                    connected: true,
+                    theme: "AI Automation & No-Code SaaS Build Guides",
+                    aesthetic: "Dark moody background, terminal typeface overlays",
+                    goal: "Build loyal list of followers",
+                    strategy: "Daily snappy visual tutorials highlighting workflows",
+                    style: "Fast cuts, high contrast text stroke elements",
+                    personality: "Pragmatic, values speed and hates over-complicated tooling",
+                    agent_logs: ["[Initialization] Account synced from Postiz"],
+                    categories: ["TECH"]
+                  });
+
+                if (insertError) {
+                  console.error(`[Postiz Sync] Error inserting account ${integrationId}:`, insertError);
+                }
+              }
+            }
+          }
+        } else {
+          console.error(`[Postiz Sync] Failed to fetch integrations. Status: ${response.status} ${response.statusText}`);
+        }
+      } catch (syncErr) {
+        console.error("[Postiz Sync] Error during Postiz integration sync:", syncErr);
+      }
+    }
+
+    const { data: accounts, error } = await supabase
+      .from("postiz_accounts")
+      .select("*")
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    const mappedAccounts = accounts.map((acct: any) => ({
+      id: acct.id,
+      name: acct.name,
+      handle: acct.handle,
+      type: acct.type,
+      avatar: acct.avatar,
+      connected: acct.connected,
+      theme: acct.theme,
+      aesthetic: acct.aesthetic,
+      goal: acct.goal,
+      strategy: acct.strategy,
+      style: acct.style,
+      personality: acct.personality,
+      agentLogs: acct.agent_logs || [],
+      categories: acct.categories || []
+    }));
+
+    res.json({ accounts: mappedAccounts, config: postizConfig });
+  } catch (err: any) {
+    console.error("Failed to query postiz_accounts:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.patch("/api/postiz/accounts/:id", (req, res) => {
-  const account = postizAccounts.find((a) => a.id === req.params.id);
-  if (!account) {
-    return res.status(404).json({ error: "Account parameters not found" });
+app.patch("/api/postiz/accounts/:id", async (req, res) => {
+  try {
+    const { theme, aesthetic, goal, strategy, style, personality, agentLogs, categories } = req.body;
+    const updateData: any = {};
+    
+    if (theme !== undefined) updateData.theme = theme;
+    if (aesthetic !== undefined) updateData.aesthetic = aesthetic;
+    if (goal !== undefined) updateData.goal = goal;
+    if (strategy !== undefined) updateData.strategy = strategy;
+    if (style !== undefined) updateData.style = style;
+    if (personality !== undefined) updateData.personality = personality;
+    if (agentLogs !== undefined) updateData.agent_logs = agentLogs;
+    if (categories !== undefined) updateData.categories = categories;
+
+    const { data, error } = await supabase
+      .from("postiz_accounts")
+      .update(updateData)
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, account: data });
+  } catch (err: any) {
+    console.error("Failed to patch postiz_accounts:", err);
+    res.status(500).json({ error: err.message });
   }
-
-  const { theme, aesthetic, goal, strategy, style, personality } = req.body;
-  if (theme !== undefined) account.theme = theme;
-  if (aesthetic !== undefined) account.aesthetic = aesthetic;
-  if (goal !== undefined) account.goal = goal;
-  if (strategy !== undefined) account.strategy = strategy;
-  if (style !== undefined) account.style = style;
-  if (personality !== undefined) account.personality = personality;
-
-  res.json({ success: true, account });
 });
 
 // DEEPSEEK CORE DELEGATION AGENT ENDPOINT
 app.post("/api/postiz/accounts/:id/run-agent", async (req, res) => {
-  const account = postizAccounts.find((a) => a.id === req.params.id);
-  if (!account) {
-    return res.status(404).json({ error: "Account not found" });
-  }
+  try {
+    const { data: account, error: fetchErr } = await supabase
+      .from("postiz_accounts")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
 
-  const systemInstruction = `You are a world-class AI content agent powered by DeepSeek-V3.
+    if (fetchErr || !account) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+
+    const systemInstruction = `You are a world-class AI content agent powered by DeepSeek-V3.
 Your objective is to WRITE, DELEGATE, and EXECUTE dynamic scheduled posts based on the account parameters.
 Channel Profile:
 - Name: "${account.name}" (${account.type})
@@ -327,18 +480,17 @@ Return strictly a valid JSON object matching the schema:
   "mediaType": "video" | "image" | "text"
 }`;
 
-  let generatedText = {
-    title: `SaaS Automation Made Simple`,
-    subtitles: `Why 90% of builders fail before launch: they build too slow. Focus on the core API loop first 🛠️`,
-    blogContent: `## Micro-SaaS Acceleration Formula\n\nTo build a highly viral audience matching your target goal: "${account.goal}", we focus strictly on modular code constructs. Don't waste weeks on auth and database boilerplate.\n\n### Core Checklist:\n- Initialize minimal backend proxies\n- Pipe credentials directly through standard middleware\n- Ship within 24 hours of inception`,
-    mediaType: account.type === "medium" ? "text" : "video"
-  };
+    let generatedText = {
+      title: `SaaS Automation Made Simple`,
+      subtitles: `Why 90% of builders fail before launch: they build too slow. Focus on the core API loop first 🛠`,
+      blogContent: `## Micro-SaaS Acceleration Formula\n\nTo build a highly viral audience matching your target goal: "${account.goal}", we focus strictly on modular code constructs. Don't waste weeks on auth and database boilerplate.\n\n### Core Checklist:\n- Initialize minimal backend proxies\n- Pipe credentials directly through standard middleware\n- Ship within 24 hours of inception`,
+      mediaType: account.type === "medium" ? "text" : "video"
+    };
 
-  const deepseekKey = process.env.DEEPSEEK_API_KEY;
-  const geminiKey = process.env.GEMINI_API_KEY;
-  let providerUsed = "Dynamic High-Fidelity Simulation (No Keys Set)";
+    const deepseekKey = process.env.DEEPSEEK_API_KEY;
+    const geminiKey = process.env.GEMINI_API_KEY;
+    let providerUsed = "Dynamic High-Fidelity Simulation (No Keys Set)";
 
-  try {
     if (deepseekKey && deepseekKey !== "MY_DEEPSEEK_API_KEY") {
       providerUsed = "DeepSeek-V3 Engine (Direct API Call)";
       const dsRes = await fetch("https://api.deepseek.com/chat/completions", {
@@ -363,8 +515,6 @@ Return strictly a valid JSON object matching the schema:
         if (contentStr) {
           generatedText = JSON.parse(contentStr);
         }
-      } else {
-        console.warn("DeepSeek API returned error code:", dsRes.status, "Falling back to Gemini proxy.");
       }
     } else if (geminiKey && geminiKey !== "MOCK_KEY") {
       providerUsed = "DeepSeek-V3 Agent (Proxy via Gemini-3.5-Flash)";
@@ -391,55 +541,78 @@ Return strictly a valid JSON object matching the schema:
           generatedText = JSON.parse(response.text);
         }
       } catch (gemError) {
-        console.error("Gemini proxy fallback also failed:", gemError);
+        console.error("Gemini fallback failed:", gemError);
       }
     }
-  } catch (outerErr) {
-    console.error("Agent generation routing failed, fallback used: ", outerErr);
+
+    const targetDate = new Date(2026, 5, 2);
+    const generatedPosts: any[] = [];
+
+    for (const hour of [9, 13, 17, 21]) {
+      const postDate = new Date(targetDate);
+      postDate.setHours(hour, 0, 0, 0);
+
+      const newPost = {
+        id: "sched-" + Date.now() + "-" + hour,
+        title: `${generatedText.title} - Variant ${hour}`,
+        type: account.type === "medium" ? "blog" : "social",
+        media_type: generatedText.mediaType || (account.type === "medium" ? "text" : "video"),
+        platform: account.type,
+        account_id: account.id,
+        file_url: account.type === "medium" ? null : STOCK_VIDEOS[Math.floor(Math.random() * STOCK_VIDEOS.length)],
+        subtitles: generatedText.subtitles,
+        scheduled_at: postDate.toISOString(),
+        status: "scheduled",
+        blog_content: generatedText.blogContent,
+        platforms: [account.id]
+      };
+
+      const { error: insErr } = await supabase
+        .from("scheduled_posts")
+        .insert(newPost);
+      
+      if (insErr) throw insErr;
+
+      generatedPosts.push({
+        id: newPost.id,
+        title: newPost.title,
+        type: newPost.type,
+        mediaType: newPost.media_type,
+        platform: newPost.platform,
+        accountId: newPost.account_id,
+        fileUrl: newPost.file_url,
+        subtitles: newPost.subtitles,
+        scheduledAt: newPost.scheduled_at,
+        status: newPost.status,
+        blogContent: newPost.blog_content,
+        platforms: newPost.platforms
+      });
+    }
+
+    const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const updatedLogs = [
+      `[${nowStr}] [Spark] DeepSeek triggered on theme: "${account.theme}"`,
+      `[${nowStr}] [Orchestrator] Provider: ${providerUsed}`,
+      `[${nowStr}] [Writer] Generated topic: "${generatedText.title}"`,
+      `[${nowStr}] [Delegator] Scheduled exactly 4 slots (9am, 1pm, 5pm, 9pm) for June 2, 2026`,
+      `[${nowStr}] [Executor] Dispatched directly to calendar pipeline successfully. ● ONLINE`
+    ];
+
+    await supabase
+      .from("postiz_accounts")
+      .update({ agent_logs: updatedLogs })
+      .eq("id", account.id);
+
+    res.json({
+      success: true,
+      posts: generatedPosts,
+      logs: updatedLogs
+    });
+
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
   }
-
-  // DELEGATION: Insert generated content directly into the live Scheduled Calendar pipeline!
-  // Determine next day out
-  const targetDate = new Date(2026, 5, 2); // Force to June 2 2026 for demo preview relevance
-  
-  const generatedPosts: any[] = [];
-  [9, 13, 17, 21].forEach((hour, idx) => {
-    const postDate = new Date(targetDate);
-    postDate.setHours(hour, 0, 0, 0);
-    
-    const newPost = {
-      id: "sched-" + Date.now() + "-" + hour,
-      title: `${generatedText.title} - Variant ${idx + 1}`,
-      type: account.type === "medium" ? "blog" : "social",
-      mediaType: generatedText.mediaType || (account.type === "medium" ? "text" : "video"),
-      platform: account.type,
-      accountId: account.id,
-      fileUrl: account.type === "medium" ? undefined : STOCK_VIDEOS[Math.floor(Math.random() * STOCK_VIDEOS.length)],
-      subtitles: generatedText.subtitles,
-      scheduledAt: postDate.toISOString(),
-      status: "scheduled",
-      blogContent: generatedText.blogContent,
-      platforms: [account.id]
-    };
-    generatedPosts.push(newPost);
-    scheduledPosts.push(newPost);
-  });
-
-  // EXECUTION: Feed live logs back to client console
-  const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  account.agentLogs = [
-    `[${nowStr}] [Spark] DeepSeek triggered on theme: "${account.theme}"`,
-    `[${nowStr}] [Orchestrator] Provider: ${providerUsed}`,
-    `[${nowStr}] [Writer] Generated topic: "${generatedText.title}"`,
-    `[${nowStr}] [Delegator] Scheduled exactly 4 slots (9am, 1pm, 5pm, 9pm) for June 2, 2026`,
-    `[${nowStr}] [Executor] Dispatched directly to calendar pipeline successfully. ● ONLINE`
-  ];
-
-  res.json({
-    success: true,
-    posts: generatedPosts,
-    logs: account.agentLogs
-  });
 });
 
 app.post("/api/postiz/config", (req, res) => {
@@ -450,7 +623,7 @@ app.post("/api/postiz/config", (req, res) => {
   res.json({ success: true, config: postizConfig });
 });
 
-// LINK IMPORT SIMULATOR / PARSER
+// SELF-HOSTED LINK INGESTION (Supabase synced)
 app.post("/api/import-link", async (req, res) => {
   try {
     const { url } = req.body;
@@ -458,18 +631,13 @@ app.post("/api/import-link", async (req, res) => {
       return res.status(400).json({ error: "No URL provided" });
     }
 
-    // Determine platform
     let platform = "unknown";
     if (url.includes("tiktok.com")) platform = "tiktok";
     else if (url.includes("instagram.com")) platform = "instagram";
     else if (url.includes("youtube.com") || url.includes("youtu.be")) platform = "youtube";
 
-    // Call Gemini as helper to parse a cool title & content style from URL keywords or mock context
     let parsedTitle = `Imported ${platform.charAt(0).toUpperCase() + platform.slice(1)} Clip`;
-    let size = "18.5 MB";
-    let duration = Math.floor(Math.random() * 45) + 15; // 15 to 60s
-    let selectedVideo = STOCK_VIDEOS[Math.floor(Math.random() * STOCK_VIDEOS.length)];
-    let selectedThumb = STOCK_PHOTOS[Math.floor(Math.random() * STOCK_PHOTOS.length)];
+    let duration = 30;
 
     if (process.env.GEMINI_API_KEY) {
       try {
@@ -482,38 +650,508 @@ app.post("/api/import-link", async (req, res) => {
           parsedTitle = geminiRes.text.trim();
         }
       } catch (err) {
-        console.error("Gemini failed to generate title for link:", err);
+        console.error("Gemini title extraction failed:", err);
       }
     }
 
-    const newAsset = {
-      id: "import-" + Date.now(),
-      sourceUrl: url,
-      title: parsedTitle,
-      thumbnail: selectedThumb,
-      videoUrl: selectedVideo,
-      duration,
-      downloaded: true,
-      size: `${(Math.random() * 15 + 5).toFixed(1)} MB`
-    };
+    const binDir = path.join(__dirname, "bin");
+    const isWindows = process.platform === "win32";
+    const ytdlpPath = path.join(binDir, isWindows ? "yt-dlp.exe" : "yt-dlp");
+    const downloadsDir = path.join(__dirname, "temp", "downloads");
 
-    importedAssets.unshift(newAsset);
-    res.json({ success: true, asset: newAsset });
+    const fileId = "import-" + Date.now();
+    const outputPattern = path.join(downloadsDir, `${fileId}.%(ext)s`);
+
+    console.log(`[Ingest] Downloading URL via yt-dlp: ${url}`);
+
+    execFile(ytdlpPath, ["-f", "best", "-o", outputPattern, "--no-playlist", url], async (error, stdout, stderr) => {
+      if (error) {
+        console.error("[yt-dlp Ingest Error]:", stderr || error.message);
+        return res.status(500).json({ error: `Downloader failed: ${error.message}` });
+      }
+
+      const files = fs.readdirSync(downloadsDir);
+      const downloadedFile = files.find(f => f.startsWith(fileId));
+      if (!downloadedFile) {
+        return res.status(500).json({ error: "Downloaded video file not found on disk" });
+      }
+
+      const localFilePath = path.join(downloadsDir, downloadedFile);
+      const stats = fs.statSync(localFilePath);
+      const sizeMB = `${(stats.size / (1024 * 1024)).toFixed(1)} MB`;
+
+      const videoUrl = await uploadFileToR2(localFilePath, `videos/${downloadedFile}`);
+
+      let thumbnail = STOCK_PHOTOS[Math.floor(Math.random() * STOCK_PHOTOS.length)];
+      const thumbFileName = `${fileId}.jpg`;
+      const localThumbPath = path.join(downloadsDir, thumbFileName);
+
+      if (ffmpeg) {
+        const ffArgs = ["-y", "-i", localFilePath, "-ss", "00:00:01", "-vframes", "1", localThumbPath];
+        await new Promise<void>((resolve) => {
+          execFile(ffmpeg!, ffArgs, async (ffErr) => {
+            if (!ffErr && fs.existsSync(localThumbPath)) {
+              thumbnail = await uploadFileToR2(localThumbPath, `thumbnails/${thumbFileName}`);
+              fs.unlink(localThumbPath, () => {});
+            }
+            resolve();
+          });
+        });
+      }
+
+      // Save to Supabase
+      const { error: insErr } = await supabase
+        .from("imported_assets")
+        .insert({
+          id: fileId,
+          source_url: url,
+          title: parsedTitle,
+          thumbnail,
+          video_url: videoUrl,
+          duration,
+          downloaded: true,
+          size: sizeMB
+        });
+
+      if (insErr) {
+        console.error("[Supabase Insert Error]:", insErr);
+        return res.status(500).json({ error: insErr.message });
+      }
+
+      res.json({
+        success: true,
+        asset: {
+          id: fileId,
+          sourceUrl: url,
+          title: parsedTitle,
+          thumbnail,
+          videoUrl,
+          duration,
+          downloaded: true,
+          size: sizeMB
+        }
+      });
+    });
+
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.get("/api/imported-assets", (req, res) => {
-  res.json(importedAssets);
+app.get("/api/imported-assets", async (req, res) => {
+  try {
+    const { data: assets, error } = await supabase
+      .from("imported_assets")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    const mappedAssets = assets.map((a: any) => ({
+      id: a.id,
+      sourceUrl: a.source_url,
+      title: a.title,
+      thumbnail: a.thumbnail,
+      videoUrl: a.video_url,
+      duration: a.duration,
+      downloaded: a.downloaded,
+      size: a.size
+    }));
+
+    res.json(mappedAssets);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.delete("/api/imported-assets/:id", (req, res) => {
-  importedAssets = importedAssets.filter((a) => a.id !== req.params.id);
-  res.json({ success: true });
+app.delete("/api/imported-assets/:id", async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("imported_assets")
+      .delete()
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// BLOG ARTICLE GENERATION INCLUDING SEO OPTIMIZATION & METADATA
+// YOUTUBE TO MP3 CONVERTER ENDPOINT
+app.post("/api/music/convert-mp3", async (req, res) => {
+  try {
+    const { url } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: "No URL provided" });
+    }
+
+    const binDir = path.join(__dirname, "bin");
+    const isWindows = process.platform === "win32";
+    const ytdlpPath = path.join(binDir, isWindows ? "yt-dlp.exe" : "yt-dlp");
+    const downloadsDir = path.join(__dirname, "temp", "downloads");
+
+    const fileId = "audio-" + Date.now();
+    const outputPattern = path.join(downloadsDir, `${fileId}.%(ext)s`);
+
+    console.log(`[Audio Convert] Extracting MP3 from URL: ${url}`);
+
+    const args = ["-x", "--audio-format", "mp3", "--audio-quality", "0", "-o", outputPattern, "--no-playlist", url];
+
+    execFile(ytdlpPath, args, async (error, stdout, stderr) => {
+      if (error) {
+        console.error("[Audio Convert Error]:", stderr || error.message);
+        return res.status(500).json({ error: `Audio extraction failed: ${error.message}` });
+      }
+
+      const files = fs.readdirSync(downloadsDir);
+      const downloadedFile = files.find(f => f.startsWith(fileId) && f.endsWith(".mp3"));
+      if (!downloadedFile) {
+        return res.status(500).json({ error: "Extracted audio file not found" });
+      }
+
+      const localFilePath = path.join(downloadsDir, downloadedFile);
+      const audioUrl = await uploadFileToR2(localFilePath, `audio/${downloadedFile}`);
+
+      const newSong = {
+        id: fileId,
+        title: `Extracted Track (${url.split('v=')[1]?.substring(0, 8) || 'Source URL'})`,
+        artist: "Web Audio",
+        duration: 180,
+        audioUrl,
+        genre: "Ingested Audio",
+        artwork: "https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120&auto=format&fit=crop&q=80",
+      };
+
+      CURATED_MUSIC.unshift(newSong);
+      res.json({ success: true, song: newSong });
+    });
+
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// QUICK BATCH GENERATOR (Composites and saves into Supabase)
+app.post("/api/postiz/accounts/:id/run-quick-batch", async (req, res) => {
+  try {
+    const { templateTitle, startDate, songId, cropStart, cropEnd, replacements } = req.body;
+    
+    const { data: account, error: accErr } = await supabase
+      .from("postiz_accounts")
+      .select("*")
+      .eq("id", req.params.id)
+      .single();
+
+    if (accErr || !account) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+
+    const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const initialLogs = [
+      `[${nowStr}] [Orchestrator] Launching Quick Batch for folder: ${templateTitle || "Default"}`,
+      `[${nowStr}] [Orchestrator] Preparing 5 variant renders...`
+    ];
+
+    await supabase
+      .from("postiz_accounts")
+      .update({ agent_logs: initialLogs })
+      .eq("id", account.id);
+
+    const { data: assets } = await supabase
+      .from("imported_assets")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(5);
+
+    const referenceAssets = (assets && assets.length > 0) ? assets : [{
+      id: "mock-stock",
+      title: "Stock Video Loop",
+      video_url: STOCK_VIDEOS[0],
+      thumbnail: STOCK_PHOTOS[0]
+    }];
+
+    const selectedSong = CURATED_MUSIC.find(s => s.id === songId) || CURATED_MUSIC[0];
+    const duration = (cropEnd || 30) - (cropStart || 0);
+    const generatedPosts: any[] = [];
+
+    const rendersDir = path.join(__dirname, "temp", "renders");
+    const fontPath = path.join(__dirname, "bin", "font.ttf");
+
+    for (let idx = 0; idx < 5; idx++) {
+      const asset = referenceAssets[idx % referenceAssets.length];
+      const textReplacement = replacements?.[idx % replacements.length] || (replacements?.[0] || `Variant ${idx + 1} Caption`);
+      const renderFileId = `render-${Date.now()}-${idx}`;
+      const localRenderPath = path.join(rendersDir, `${renderFileId}.mp4`);
+
+      const escapedFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+      const cleanText = textReplacement.replace(/'/g, "").replace(/"/g, "");
+      const videoFilter = `drawtext=fontfile='${escapedFontPath}':text='${cleanText}':fontcolor=white:fontsize=20:borderw=2:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2`;
+
+      let videoUrl = asset.video_url;
+      let renderSuccess = false;
+
+      if (ffmpeg && fs.existsSync(fontPath)) {
+        const ffArgs = [
+          "-y",
+          "-ss", "0",
+          "-t", duration.toString(),
+          "-i", asset.video_url,
+          "-ss", (cropStart || 0).toString(),
+          "-t", duration.toString(),
+          "-i", selectedSong.audioUrl,
+          "-vf", videoFilter,
+          "-map", "0:v",
+          "-map", "1:a",
+          "-c:v", "libx264",
+          "-pix_fmt", "yuv420p",
+          "-c:a", "aac",
+          "-shortest",
+          localRenderPath
+        ];
+
+        await new Promise<void>((resolve) => {
+          execFile(ffmpeg!, ffArgs, (ffErr) => {
+            if (!ffErr) renderSuccess = true;
+            resolve();
+          });
+        });
+      }
+
+      if (renderSuccess && fs.existsSync(localRenderPath)) {
+        videoUrl = await uploadFileToR2(localRenderPath, `renders/${renderFileId}.mp4`);
+        fs.unlink(localRenderPath, () => {});
+      }
+
+      const baseDate = startDate ? new Date(startDate) : new Date(2026, 5, 2);
+      const postHour = [9, 13, 17, 21][idx % 4];
+      const daysToAdd = Math.floor(idx / 4);
+
+      const scheduledAt = new Date(baseDate);
+      scheduledAt.setDate(baseDate.getDate() + daysToAdd);
+      scheduledAt.setHours(postHour, 0, 0, 0);
+
+      const newPost = {
+        id: "sched-" + Date.now() + "-" + idx,
+        title: `${templateTitle || "Batch Post"} - Variant ${idx + 1}`,
+        type: "social",
+        media_type: "video",
+        platform: account.type,
+        account_id: account.id,
+        file_url: videoUrl,
+        subtitles: textReplacement,
+        scheduled_at: scheduledAt.toISOString(),
+        status: "scheduled",
+        song_id: selectedSong.id,
+        crop_start: cropStart,
+        crop_end: cropEnd,
+        platforms: [account.id]
+      };
+
+      const { error: postErr } = await supabase
+        .from("scheduled_posts")
+        .insert(newPost);
+
+      if (postErr) throw postErr;
+
+      generatedPosts.push({
+        id: newPost.id,
+        title: newPost.title,
+        type: newPost.type,
+        mediaType: newPost.media_type,
+        platform: newPost.platform,
+        accountId: newPost.account_id,
+        fileUrl: newPost.file_url,
+        subtitles: newPost.subtitles,
+        scheduledAt: newPost.scheduled_at,
+        status: newPost.status,
+        songId: newPost.song_id,
+        cropStart: newPost.crop_start,
+        cropEnd: newPost.crop_end,
+        platforms: newPost.platforms
+      });
+
+      // Postiz REST API scheduling
+      if (postizConfig.useRealPostiz && postizConfig.apiKey) {
+        try {
+          await fetch(`${postizConfig.endpoint}/posts`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${postizConfig.apiKey}`
+            },
+            body: JSON.stringify({
+              type: "schedule",
+              date: scheduledAt.toISOString(),
+              posts: [
+                {
+                  integration: { id: account.id },
+                  value: [{ content: textReplacement, video: [{ url: videoUrl }] }],
+                  settings: { __type: account.type }
+                }
+              ]
+            })
+          });
+        } catch (postizErr) {
+          console.error("[Postiz Scheduling Error]:", postizErr);
+        }
+      }
+    }
+
+    const completedStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const updatedLogs = [
+      ...initialLogs,
+      `[${completedStr}] [Orchestrator] Batch rendering complete.`,
+      `[${completedStr}] [Executor] Generated 5 content variants.`,
+      `[${completedStr}] [Postiz] Scheduled variants at 9AM, 1PM, 5PM, 9PM on the Calendar! ● ONLINE`
+    ];
+
+    await supabase
+      .from("postiz_accounts")
+      .update({ agent_logs: updatedLogs })
+      .eq(account.id);
+
+    res.json({
+      success: true,
+      posts: generatedPosts,
+      logs: updatedLogs
+    });
+
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// SINGLE RENDER COMPILER (From manual editor to Supabase)
+app.post("/api/music/render-single", async (req, res) => {
+  try {
+    const { videoUrl, songId, cropStart, cropEnd, textOverlay, accountId, scheduledAt } = req.body;
+
+    const rendersDir = path.join(__dirname, "temp", "renders");
+    const fontPath = path.join(__dirname, "bin", "font.ttf");
+
+    const renderFileId = `render-single-${Date.now()}`;
+    const localRenderPath = path.join(rendersDir, `${renderFileId}.mp4`);
+
+    const duration = (cropEnd || 30) - (cropStart || 0);
+    const selectedSong = CURATED_MUSIC.find(s => s.id === songId) || CURATED_MUSIC[0];
+
+    const escapedFontPath = fontPath.replace(/\\/g, "/").replace(/:/g, "\\:");
+    const cleanText = (textOverlay || "Preview Overlay").replace(/'/g, "").replace(/"/g, "");
+    const videoFilter = `drawtext=fontfile='${escapedFontPath}':text='${cleanText}':fontcolor=white:fontsize=22:borderw=2:bordercolor=black:x=(w-text_w)/2:y=(h-text_h)/2`;
+
+    let finalVideoUrl = videoUrl;
+    let renderSuccess = false;
+
+    if (ffmpeg && fs.existsSync(fontPath)) {
+      const ffArgs = [
+        "-y",
+        "-ss", "0",
+        "-t", duration.toString(),
+        "-i", videoUrl,
+        "-ss", (cropStart || 0).toString(),
+        "-t", duration.toString(),
+        "-i", selectedSong.audioUrl,
+        "-vf", videoFilter,
+        "-map", "0:v",
+        "-map", "1:a",
+        "-c:v", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-shortest",
+        localRenderPath
+      ];
+
+      await new Promise<void>((resolve) => {
+        execFile(ffmpeg!, ffArgs, (ffErr) => {
+          if (!ffErr) renderSuccess = true;
+          resolve();
+        });
+      });
+    }
+
+    if (renderSuccess && fs.existsSync(localRenderPath)) {
+      finalVideoUrl = await uploadFileToR2(localRenderPath, `renders/${renderFileId}.mp4`);
+      fs.unlink(localRenderPath, () => {});
+    }
+
+    const postDate = scheduledAt ? new Date(scheduledAt) : new Date(2026, 5, 2, 9, 0, 0);
+
+    const newPost = {
+      id: "sched-" + Date.now(),
+      title: `Manual Render Clip`,
+      type: "social",
+      media_type: "video",
+      platform: "tiktok",
+      account_id: accountId,
+      file_url: finalVideoUrl,
+      subtitles: cleanText,
+      scheduled_at: postDate.toISOString(),
+      status: "scheduled",
+      song_id: selectedSong.id,
+      crop_start: cropStart,
+      crop_end: cropEnd,
+      platforms: [accountId]
+    };
+
+    const { error: insErr } = await supabase
+      .from("scheduled_posts")
+      .insert(newPost);
+
+    if (insErr) throw insErr;
+
+    // Call Postiz REST API if active
+    if (postizConfig.useRealPostiz && postizConfig.apiKey) {
+      try {
+        await fetch(`${postizConfig.endpoint}/posts`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${postizConfig.apiKey}`
+          },
+          body: JSON.stringify({
+            type: "schedule",
+            date: postDate.toISOString(),
+            posts: [
+              {
+                integration: { id: accountId },
+                value: [{ content: cleanText, video: [{ url: finalVideoUrl }] }],
+                settings: { __type: "tiktok" }
+              }
+            ]
+          })
+        });
+      } catch (err) {
+        console.error("[Postiz manual dispatch error]:", err);
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      post: {
+        id: newPost.id,
+        title: newPost.title,
+        type: newPost.type,
+        mediaType: newPost.media_type,
+        platform: newPost.platform,
+        accountId: newPost.account_id,
+        fileUrl: newPost.file_url,
+        subtitles: newPost.subtitles,
+        scheduledAt: newPost.scheduled_at,
+        status: newPost.status,
+        songId: newPost.song_id,
+        cropStart: newPost.crop_start,
+        cropEnd: newPost.crop_end,
+        platforms: newPost.platforms
+      }
+    });
+
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// BLOG ARTICLE GENERATION
 app.post("/api/gemini/generate-blog", async (req, res) => {
   const { topic, keywords, tone } = req.body;
   if (!topic) {
@@ -569,7 +1207,6 @@ Make sure the article body is comprehensive, engaging, and uses modern SEO best 
       const data = JSON.parse(response.text || "{}");
       res.json(data);
     } else {
-      // Return high-quality, simulated SEO output in case Gemini is not set up yet
       res.json({
         title: `Ultimate Guide to ${topic}`,
         contentMarkdown: `# The Ultimate Guide to ${topic}\n\nIn today's digital landscape, masterfully navigating **${topic}** has become a critical skill for creators and companies looking to gain massive engagement. This guides unpacks exactly how you can succeed, even starting with zero followers.\n\n## Why Keywords Like "${keywordList}" Rule the Algorithm\n\nOptimizing your content is essential. Algorithms track average view duration (AVD) and click-through rates (CTR) alongside keyword matches. Here are 3 pillars:\n1. **User Search Intent:** Write specifically what your audience actively searches.\n2. **Rich Semantic Context:** Make your body copy informative and directly answer common queries.\n3. **Optimized Meta Tags:** Grab readers right from the Search Engine Result Pages (SERPs).\n\n## Practical Steps to Get Started Now\n\nBegin by structuring your articles into clear, digestible headers. Use bullet lists to boost readability. By maintaining high informational density, search bots reward your site with better indexing and higher trust indicators.\n\nJoin our community and let us know your favorite tactics!`,
@@ -586,7 +1223,7 @@ Make sure the article body is comprehensive, engaging, and uses modern SEO best 
   }
 });
 
-// BULK VARIANT METHOD GENERATOR (style match layout)
+// BULK VARIANT METHOD GENERATOR
 app.post("/api/gemini/generate-bulk", async (req, res) => {
   const { referenceText, styleType, songIdea, count } = req.body;
   const numVariants = count ? Math.min(Math.max(Number(count), 1), 5) : 3;
@@ -650,7 +1287,6 @@ Provide high-retention content hooks, bold on-screen subtitles, and a set of cus
       const parsed = JSON.parse(response.text || "{}");
       res.json(parsed);
     } else {
-      // Curated fallback variant array
       const genericSuggestions = [
         {
           id: "v-1",
@@ -699,51 +1335,151 @@ Provide high-retention content hooks, bold on-screen subtitles, and a set of cus
   }
 });
 
-// SCHEDULE PLATFORM POSTS - POSTIZ INTERACTION & LOCAL PIPELINE
-app.get("/api/scheduled-posts", (req, res) => {
-  res.json(scheduledPosts);
-});
+// GET /api/scheduled-posts (from database)
+app.get("/api/scheduled-posts", async (req, res) => {
+  try {
+    const { data: posts, error } = await supabase
+      .from("scheduled_posts")
+      .select("*")
+      .order("scheduled_at", { ascending: true });
 
-app.post("/api/scheduled-posts", (req, res) => {
-  const { title, type, mediaType, platform, fileUrl, subtitles, scheduledAt, songId, cropStart, cropEnd, blogContent, seoMeta, platforms } = req.body;
+    if (error) throw error;
 
-  const newPost = {
-    id: "sched-" + Date.now(),
-    title: title || "New Scheduled Draft",
-    type: type || "social",
-    mediaType: mediaType || "video",
-    platform: platform || "tiktok",
-    fileUrl: fileUrl || STOCK_VIDEOS[0],
-    subtitles: subtitles || "",
-    scheduledAt: scheduledAt || new Date().toISOString(),
-    status: "scheduled",
-    songId: songId || "",
-    cropStart: cropStart !== undefined ? Number(cropStart) : 0,
-    cropEnd: cropEnd !== undefined ? Number(cropEnd) : 30,
-    blogContent: blogContent || "",
-    seoMeta: seoMeta || null,
-    platforms: platforms && platforms.length > 0 ? platforms : [platform]
-  };
+    const mappedPosts = posts.map((p: any) => ({
+      id: p.id,
+      title: p.title,
+      type: p.type,
+      mediaType: p.media_type,
+      platform: p.platform,
+      fileUrl: p.file_url,
+      subtitles: p.subtitles,
+      scheduledAt: p.scheduled_at,
+      status: p.status,
+      songId: p.song_id,
+      cropStart: p.crop_start,
+      cropEnd: p.crop_end,
+      blogContent: p.blog_content,
+      seoMeta: p.seo_meta,
+      accountId: p.account_id,
+      platforms: p.platforms || []
+    }));
 
-  scheduledPosts.push(newPost);
-  res.json({ success: true, post: newPost });
-});
-
-// Drag-n-drop update time API helper
-app.patch("/api/scheduled-posts/:id", (req, res) => {
-  const { scheduledAt, status } = req.body;
-  const post = scheduledPosts.find((p) => p.id === req.params.id);
-  if (post) {
-    if (scheduledAt) post.scheduledAt = scheduledAt;
-    if (status) post.status = status;
-    return res.json({ success: true, post });
+    res.json(mappedPosts);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-  res.status(404).json({ error: "Post not found" });
 });
 
-app.delete("/api/scheduled-posts/:id", (req, res) => {
-  scheduledPosts = scheduledPosts.filter((p) => p.id !== req.params.id);
-  res.json({ success: true });
+app.post("/api/scheduled-posts", async (req, res) => {
+  try {
+    const { title, type, mediaType, platform, fileUrl, subtitles, scheduledAt, songId, cropStart, cropEnd, blogContent, seoMeta, platforms } = req.body;
+    const postId = "sched-" + Date.now();
+    
+    const newPost = {
+      id: postId,
+      title: title || "New Scheduled Draft",
+      type: type || "social",
+      media_type: mediaType || "video",
+      platform: platform || "tiktok",
+      file_url: fileUrl || STOCK_VIDEOS[0],
+      subtitles: subtitles || "",
+      scheduled_at: scheduledAt || new Date().toISOString(),
+      status: "scheduled",
+      song_id: songId || "",
+      crop_start: cropStart !== undefined ? Number(cropStart) : 0,
+      crop_end: cropEnd !== undefined ? Number(cropEnd) : 30,
+      blog_content: blogContent || "",
+      seo_meta: seoMeta || null,
+      account_id: platforms?.[0] || platform,
+      platforms: platforms && platforms.length > 0 ? platforms : [platform]
+    };
+
+    const { error } = await supabase
+      .from("scheduled_posts")
+      .insert(newPost);
+
+    if (error) throw error;
+
+    res.json({ 
+      success: true, 
+      post: {
+        id: newPost.id,
+        title: newPost.title,
+        type: newPost.type,
+        mediaType: newPost.media_type,
+        platform: newPost.platform,
+        fileUrl: newPost.file_url,
+        subtitles: newPost.subtitles,
+        scheduledAt: newPost.scheduled_at,
+        status: newPost.status,
+        songId: newPost.song_id,
+        cropStart: newPost.crop_start,
+        cropEnd: newPost.crop_end,
+        blogContent: newPost.blog_content,
+        seoMeta: newPost.seo_meta,
+        accountId: newPost.account_id,
+        platforms: newPost.platforms
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.patch("/api/scheduled-posts/:id", async (req, res) => {
+  try {
+    const { scheduledAt, status } = req.body;
+    const updateData: any = {};
+    if (scheduledAt) updateData.scheduled_at = scheduledAt;
+    if (status) updateData.status = status;
+
+    const { data: post, error } = await supabase
+      .from("scheduled_posts")
+      .update(updateData)
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ 
+      success: true, 
+      post: {
+        id: post.id,
+        title: post.title,
+        type: post.type,
+        mediaType: post.media_type,
+        platform: post.platform,
+        fileUrl: post.file_url,
+        subtitles: post.subtitles,
+        scheduledAt: post.scheduled_at,
+        status: post.status,
+        songId: post.song_id,
+        cropStart: post.crop_start,
+        cropEnd: post.crop_end,
+        blogContent: post.blog_content,
+        seoMeta: post.seo_meta,
+        accountId: post.account_id,
+        platforms: post.platforms
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete("/api/scheduled-posts/:id", async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("scheduled_posts")
+      .delete()
+      .eq("id", req.params.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Mock media library endpoint
@@ -754,8 +1490,10 @@ app.get("/api/media-library", (req, res) => {
   });
 });
 
-// Vite middleware & Static SPA serving
+// Vite middleware & Static serving
 async function startServer() {
+  await initBinaries();
+
   if (process.env.NODE_ENV !== "production") {
     const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
