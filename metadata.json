@@ -1,0 +1,6 @@
+{
+  "name": "Bulk Content Studio",
+  "description": "Create bulk social media posts, generate SEO blogs, clip and overlay audio and schedule posts using Postiz",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
