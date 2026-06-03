@@ -22,7 +22,7 @@ export default function CalendarView({
   onTriggerNotification,
 }: CalendarViewProps) {
   // Use June 2026 as default based on system context local time (2026-06-02)
-  const [currentDate, setCurrentDate] = useState(() => new Date(2026, 5, 2)); 
+  const [currentDate, setCurrentDate] = useState(() => new Date());
 
   // Calendar dates math for 35 or 42 grid blocks
   const year = currentDate.getFullYear();
@@ -95,7 +95,7 @@ export default function CalendarView({
               <ChevronLeft className="h-3.5 w-3.5" />
             </button>
             <button
-              onClick={() => setCurrentDate(new Date(2026, 5, 2))} // Reset to June 2026
+              onClick={() => setCurrentDate(new Date())} // Reset to today
               className="px-4 py-1.5 bg-[#09090b] hover:bg-[#242427] border border-[#27272a] text-[11px] font-medium text-zinc-300 rounded-md transition"
             >
               Today
@@ -129,10 +129,11 @@ export default function CalendarView({
                 );
               }
 
+              const now = new Date();
               const isToday =
-                day.getDate() === 2 &&
-                day.getMonth() === 5 &&
-                day.getFullYear() === 2026; // Highlight June 2, 2026
+                day.getDate() === now.getDate() &&
+                day.getMonth() === now.getMonth() &&
+                day.getFullYear() === now.getFullYear();
 
               const dayPosts = getPostsForDay(day);
 

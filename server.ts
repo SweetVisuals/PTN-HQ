@@ -146,7 +146,8 @@ function getGeminiClient(): GoogleGenAI {
 function downloadFile(url: string, dest: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const file = fs.createWriteStream(dest);
-    const request = https.get(url, (response) => {
+    const protocol = url.startsWith('https') ? https : require('http');
+    const request = protocol.get(url, (response: any) => {
       if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         file.close();
         fs.unlink(dest, () => {});
@@ -165,12 +166,37 @@ function downloadFile(url: string, dest: string): Promise<void> {
         resolve();
       });
     });
-    request.on("error", (err) => {
+    request.on("error", (err: any) => {
       file.close();
       fs.unlink(dest, () => {});
       reject(err);
     });
   });
+}
+
+// Helper: ensure a file is local for FFmpeg processing
+async function ensureLocalFile(urlOrPath: string, tempDir: string, prefix: string): Promise<{ localPath: string; isTemp: boolean }> {
+  // Already a local file path
+  if (fs.existsSync(urlOrPath)) {
+    return { localPath: urlOrPath, isTemp: false };
+  }
+  // Local media path (served by express static)
+  if (urlOrPath.startsWith('/media/')) {
+    const localPath = path.join(__dirname, 'temp', urlOrPath.replace('/media/', ''));
+    if (fs.existsSync(localPath)) {
+      return { localPath, isTemp: false };
+    }
+  }
+  // Remote URL — download it
+  if (urlOrPath.startsWith('http://') || urlOrPath.startsWith('https://')) {
+    const ext = path.extname(new URL(urlOrPath).pathname) || '.mp4';
+    const localPath = path.join(tempDir, `${prefix}-${Date.now()}${ext}`);
+    console.log(`[FFmpeg Prep] Downloading remote file to local: ${urlOrPath}`);
+    await downloadFile(urlOrPath, localPath);
+    return { localPath, isTemp: true };
+  }
+  // Fallback: return as-is
+  return { localPath: urlOrPath, isTemp: false };
 }
 
 async function initBinaries() {
@@ -264,8 +290,8 @@ async function uploadFileToR2(localFilePath: string, key: string): Promise<strin
 
 let postizConfig = {
   endpoint: "https://api.postiz.com/public/v1",
-  apiKey: process.env.POSTIZ_API_KEY || "",
-  useRealPostiz: !!process.env.POSTIZ_API_KEY,
+  apiKey: process.env.POSTIZ_API_KEY || "a7544f474add0a9ca139c1c3e29b7e1a508e96bf02dd1f977205d3774df03734",
+  useRealPostiz: true,
 };
 
 // MUSIC SEARCH API
@@ -291,7 +317,7 @@ app.get("/api/postiz/accounts", async (req, res) => {
           method: "GET",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${postizConfig.apiKey}`
+            "Authorization": postizConfig.apiKey
           }
         });
 
@@ -299,7 +325,7 @@ app.get("/api/postiz/accounts", async (req, res) => {
           const rawData = (await response.json()) as any;
           const integrations = Array.isArray(rawData) 
             ? rawData 
-            : (rawData.integrations || rawData.data || []);
+            : (rawData.value || rawData.integrations || rawData.data || []);
 
           console.log(`[Postiz Sync] Discovered ${integrations.length} integrations from Postiz.`);
           
@@ -892,14 +918,19 @@ app.post("/api/postiz/accounts/:id/run-quick-batch", async (req, res) => {
       let renderSuccess = false;
 
       if (ffmpeg && fs.existsSync(fontPath)) {
+        // Download remote files to local for FFmpeg
+        const downloadsDir = path.join(__dirname, "temp", "downloads");
+        const videoLocal = await ensureLocalFile(asset.video_url, downloadsDir, `batch-vid-${idx}`);
+        const audioLocal = await ensureLocalFile(selectedSong.audioUrl, downloadsDir, `batch-aud-${idx}`);
+
         const ffArgs = [
           "-y",
           "-ss", "0",
           "-t", duration.toString(),
-          "-i", asset.video_url,
+          "-i", videoLocal.localPath,
           "-ss", (cropStart || 0).toString(),
           "-t", duration.toString(),
-          "-i", selectedSong.audioUrl,
+          "-i", audioLocal.localPath,
           "-vf", videoFilter,
           "-map", "0:v",
           "-map", "1:a",
@@ -912,10 +943,18 @@ app.post("/api/postiz/accounts/:id/run-quick-batch", async (req, res) => {
 
         await new Promise<void>((resolve) => {
           execFile(ffmpeg!, ffArgs, (ffErr) => {
-            if (!ffErr) renderSuccess = true;
+            if (ffErr) {
+              console.error(`[FFmpeg Batch Render ${idx}]`, ffErr.message);
+            } else {
+              renderSuccess = true;
+            }
             resolve();
           });
         });
+
+        // Cleanup temp downloads
+        if (videoLocal.isTemp) fs.unlink(videoLocal.localPath, () => {});
+        if (audioLocal.isTemp) fs.unlink(audioLocal.localPath, () => {});
       }
 
       if (renderSuccess && fs.existsSync(localRenderPath)) {
@@ -978,7 +1017,7 @@ app.post("/api/postiz/accounts/:id/run-quick-batch", async (req, res) => {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Authorization": `Bearer ${postizConfig.apiKey}`
+              "Authorization": postizConfig.apiKey
             },
             body: JSON.stringify({
               type: "schedule",
@@ -1009,7 +1048,7 @@ app.post("/api/postiz/accounts/:id/run-quick-batch", async (req, res) => {
     await supabase
       .from("postiz_accounts")
       .update({ agent_logs: updatedLogs })
-      .eq(account.id);
+      .eq("id", account.id);
 
     res.json({
       success: true,
@@ -1044,14 +1083,19 @@ app.post("/api/music/render-single", async (req, res) => {
     let renderSuccess = false;
 
     if (ffmpeg && fs.existsSync(fontPath)) {
+      // Download remote files to local for FFmpeg
+      const downloadsDir = path.join(__dirname, "temp", "downloads");
+      const videoLocal = await ensureLocalFile(videoUrl, downloadsDir, 'single-vid');
+      const audioLocal = await ensureLocalFile(selectedSong.audioUrl, downloadsDir, 'single-aud');
+
       const ffArgs = [
         "-y",
         "-ss", "0",
         "-t", duration.toString(),
-        "-i", videoUrl,
+        "-i", videoLocal.localPath,
         "-ss", (cropStart || 0).toString(),
         "-t", duration.toString(),
-        "-i", selectedSong.audioUrl,
+        "-i", audioLocal.localPath,
         "-vf", videoFilter,
         "-map", "0:v",
         "-map", "1:a",
@@ -1064,10 +1108,18 @@ app.post("/api/music/render-single", async (req, res) => {
 
       await new Promise<void>((resolve) => {
         execFile(ffmpeg!, ffArgs, (ffErr) => {
-          if (!ffErr) renderSuccess = true;
+          if (ffErr) {
+            console.error('[FFmpeg Single Render]', ffErr.message);
+          } else {
+            renderSuccess = true;
+          }
           resolve();
         });
       });
+
+      // Cleanup temp downloads
+      if (videoLocal.isTemp) fs.unlink(videoLocal.localPath, () => {});
+      if (audioLocal.isTemp) fs.unlink(audioLocal.localPath, () => {});
     }
 
     if (renderSuccess && fs.existsSync(localRenderPath)) {
@@ -1107,7 +1159,7 @@ app.post("/api/music/render-single", async (req, res) => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${postizConfig.apiKey}`
+            "Authorization": postizConfig.apiKey
           },
           body: JSON.stringify({
             type: "schedule",

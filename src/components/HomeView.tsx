@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { 
   Plus, 
   Link as LinkIcon, 
@@ -10,13 +10,14 @@ import {
   Music,
   Type,
   Play,
+  Pause,
   GripVertical,
   Scissors,
   Search,
   Image as ImageIcon,
   Sparkles
 } from "lucide-react";
-import { ImportedAsset, PostizAccount, ScheduledPost } from "../types";
+import { ImportedAsset, PostizAccount, ScheduledPost, MusicTrack } from "../types";
 import EditorView from "./EditorView";
 
 export interface HomeViewProps {
@@ -117,7 +118,7 @@ const AccountCard: React.FC<{
             <div className="text-[10px] font-bold text-zinc-400 uppercase tracking-wider">Storage</div>
           </div>
         </div>
-        <div className="text-[9px] text-zinc-600 font-mono pr-1">{Math.floor(Math.random() * 50)} ITEMS</div>
+        <div className="text-[9px] text-zinc-600 font-mono pr-1">{acct.categories?.length || 0} FOLDERS</div>
       </div>
     </div>
   );
@@ -146,23 +147,30 @@ export default function HomeView({
   const [urlInput, setUrlInput] = useState("");
   const [errorText, setErrorText] = useState("");
 
-  const [songSearch, setSongSearch] = useState("Drake - Nonstop");
+  const [songSearch, setSongSearch] = useState("");
   const [isSearchingSong, setIsSearchingSong] = useState(false);
+  const [musicLibrary, setMusicLibrary] = useState<MusicTrack[]>([]);
+  const [selectedSong, setSelectedSong] = useState<MusicTrack | null>(null);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
   
-  const mockSongs = [
-    { title: "Nonstop", artist: "Drake", duration: "3:58" },
-    { title: "God's Plan", artist: "Drake", duration: "3:18" },
-    { title: "One Dance", artist: "Drake", duration: "2:53" },
-    { title: "Jimmy Cooks", artist: "Drake", duration: "3:38" },
-    { title: "As It Was", artist: "Harry Styles", duration: "2:47" },
-    { title: "Blinding Lights", artist: "The Weeknd", duration: "3:20" },
-    { title: "Starboy", artist: "The Weeknd", duration: "3:50" },
-  ];
+  // Fetch music library from server on mount
+  useEffect(() => {
+    fetch('/api/music/search')
+      .then(res => res.json())
+      .then((data: MusicTrack[]) => {
+        setMusicLibrary(data);
+        if (data.length > 0) setSelectedSong(data[0]);
+      })
+      .catch(err => console.error('Failed to load music library', err));
+  }, []);
 
-  const filteredSongs = mockSongs.filter(s => 
-    s.title.toLowerCase().includes(songSearch.toLowerCase()) || 
-    s.artist.toLowerCase().includes(songSearch.toLowerCase())
-  );
+  const filteredSongs = songSearch.trim()
+    ? musicLibrary.filter(s => 
+        s.title.toLowerCase().includes(songSearch.toLowerCase()) || 
+        s.artist.toLowerCase().includes(songSearch.toLowerCase())
+      )
+    : musicLibrary;
 
   const [overlays, setOverlays] = useState([{ id: "1", text: "Wait till the end! 🤯" }]);
   const [useTikTokFont, setUseTikTokFont] = useState(true);
@@ -199,6 +207,9 @@ export default function HomeView({
       if (!res.ok) throw new Error("Conversion failed");
       const data = await res.json();
       if (data.success) {
+        const newTrack: MusicTrack = data.song;
+        setMusicLibrary(prev => [newTrack, ...prev]);
+        setSelectedSong(newTrack);
         setSongSearch(`${data.song.artist} - ${data.song.title}`);
         onTriggerNotification?.("Audio extracted and loaded into library!", "success");
       }
@@ -207,6 +218,18 @@ export default function HomeView({
       onTriggerNotification?.(err.message || "Failed to convert audio", "info");
     } finally {
       setIsConvertingAudio(false);
+    }
+  };
+
+  const toggleAudioPlayback = () => {
+    if (!audioRef.current || !selectedSong) return;
+    if (isPlayingAudio) {
+      audioRef.current.pause();
+      setIsPlayingAudio(false);
+    } else {
+      audioRef.current.src = selectedSong.audioUrl;
+      audioRef.current.play().catch(() => {});
+      setIsPlayingAudio(true);
     }
   };
 
@@ -328,6 +351,8 @@ export default function HomeView({
           onTriggerNotification={onTriggerNotification} 
         />
       ) : (
+        <>
+        <audio ref={audioRef} onEnded={() => setIsPlayingAudio(false)} />
         <div className="flex h-full w-full overflow-hidden">
           {/* Left Panel */}
           <div className="w-[50%] flex flex-col border-r border-[#1C1C1F] bg-[#09090b]">
@@ -403,27 +428,35 @@ export default function HomeView({
                 
                 {/* Mocked Analysis Result */}
                 <div className="mt-4 p-4 bg-[#09090b] border border-[#27272a] rounded-md space-y-3">
-                  <div className="flex gap-2 items-center text-[10px] font-bold text-emerald-400 uppercase tracking-widest">
-                    <Check className="w-3.5 h-3.5" /> Analysis Complete
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[10px] text-zinc-300">
-                    <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
-                      <span className="text-[#b388ff] font-bold block mb-1">Aim / Goal</span>
-                      High-retention short-form storytelling aimed at driving top-of-funnel conversion.
+                  {assets.length > 0 ? (
+                    <>
+                      <div className="flex gap-2 items-center text-[10px] font-bold text-emerald-400 uppercase tracking-widest">
+                        <Check className="w-3.5 h-3.5" /> Analysis Ready
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-[10px] text-zinc-300">
+                        <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
+                          <span className="text-[#b388ff] font-bold block mb-1">Reference Videos</span>
+                          {assets.length} clip{assets.length !== 1 ? 's' : ''} imported and ready for processing.
+                        </div>
+                        <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
+                          <span className="text-[#b388ff] font-bold block mb-1">Connected Accounts</span>
+                          {accounts.length} account{accounts.length !== 1 ? 's' : ''} linked for scheduling.
+                        </div>
+                        <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
+                          <span className="text-[#b388ff] font-bold block mb-1">Scheduled Posts</span>
+                          {scheduledPosts.length} post{scheduledPosts.length !== 1 ? 's' : ''} in the calendar queue.
+                        </div>
+                        <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
+                          <span className="text-[#b388ff] font-bold block mb-1">Audio Library</span>
+                          {musicLibrary.length} track{musicLibrary.length !== 1 ? 's' : ''} available for composition.
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-center py-6 text-zinc-500 text-[10px] uppercase font-mono tracking-widest">
+                      Import reference clips to begin analysis.
                     </div>
-                    <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
-                      <span className="text-[#b388ff] font-bold block mb-1">Target Psychology</span>
-                      Curiosity gap hook, fast-paced pacing (new frame every 1.5s), nostalgic vaporwave aesthetic.
-                    </div>
-                    <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
-                      <span className="text-[#b388ff] font-bold block mb-1">Pacing & Structure</span>
-                      0-3s hook with bold text overlay. 3-8s problem introduction. 8-15s solution + CTA.
-                    </div>
-                    <div className="bg-[#111113] p-3 rounded-md border border-[#1f1f22]">
-                      <span className="text-[#b388ff] font-bold block mb-1">Audio Profile</span>
-                      Trending lo-fi / phonk beat with distinct bass drops timed to visual transitions.
-                    </div>
-                  </div>
+                  )}
                 </div>
             </div>
             </div>
@@ -487,9 +520,10 @@ export default function HomeView({
                           <ImageIcon className="w-2 h-2 text-zinc-300" />
                         </div>
                       </div>
-                      <h4 className="text-[9px] font-mono text-zinc-400 group-hover:text-[#b388ff] text-center w-full truncate px-1 transition-colors leading-tight">
-                        {asset.title || 'Untitled'}
-                      </h4>
+                      <div className="p-2 border-t border-[#1f1f22]">
+                        <h4 className="text-[9px] font-medium text-zinc-300 uppercase truncate font-mono tracking-wider">{asset.title || 'Untitled'}</h4>
+                        <div className="text-[8px] text-zinc-600 mt-0.5 uppercase font-mono tracking-widest">{asset.size || 'N/A'}</div>
+                      </div>
                     </div>
                   ))
                 )}
@@ -539,7 +573,7 @@ export default function HomeView({
                             <h4 className="text-[11px] font-bold text-white uppercase tracking-wider">{folder}</h4>
                             <div className="flex gap-2 items-center mt-1">
                               <span className="text-[8px] border border-[#27272a] px-1 rounded text-zinc-500 font-mono">FOLDER</span>
-                              <span className="text-[9px] text-zinc-500 font-mono">{Math.floor(Math.random() * 500) + 50} ASSETS</span>
+                              <span className="text-[9px] text-zinc-500 font-mono">{(acct.categories && acct.categories.length) || 0} CATEGORIES</span>
                             </div>
                           </div>
                         </div>
@@ -770,22 +804,31 @@ export default function HomeView({
                           onFocus={() => setIsSearchingSong(true)}
                           onBlur={() => setTimeout(() => setIsSearchingSong(false), 200)}
                         />
-                        {isSearchingSong && songSearch && filteredSongs.length > 0 && (
+                        {isSearchingSong && filteredSongs.length > 0 && (
                           <div className="absolute top-full left-0 right-0 mt-1 bg-[#111113] border border-[#27272a] rounded-md shadow-xl z-50 max-h-40 overflow-y-auto">
                             {filteredSongs.map((song, idx) => (
                               <div 
-                                key={idx} 
+                                key={song.id || idx} 
                                 className="px-3 py-2 flex items-center justify-between hover:bg-[#1f1f22] cursor-pointer border-b border-[#1f1f22] last:border-0"
                                 onClick={() => {
+                                  setSelectedSong(song);
                                   setSongSearch(`${song.artist} - ${song.title}`);
                                   setIsSearchingSong(false);
+                                  // Stop current playback when switching songs
+                                  if (audioRef.current) {
+                                    audioRef.current.pause();
+                                    setIsPlayingAudio(false);
+                                  }
                                 }}
                               >
-                                <div>
-                                  <div className="text-[10px] text-white font-medium">{song.title}</div>
-                                  <div className="text-[9px] text-zinc-500">{song.artist}</div>
+                                <div className="flex items-center gap-2">
+                                  {song.artwork && <img src={song.artwork} className="w-6 h-6 rounded object-cover" alt="" />}
+                                  <div>
+                                    <div className="text-[10px] text-white font-medium">{song.title}</div>
+                                    <div className="text-[9px] text-zinc-500">{song.artist}</div>
+                                  </div>
                                 </div>
-                                <div className="text-[9px] font-mono text-zinc-600">{song.duration}</div>
+                                <div className="text-[9px] font-mono text-zinc-600">{Math.floor(song.duration / 60)}:{String(song.duration % 60).padStart(2, '0')}</div>
                               </div>
                             ))}
                           </div>
@@ -800,6 +843,23 @@ export default function HomeView({
                       </button>
                     </div>
                   </div>
+
+                   {/* Selected Song Display + Play Button */}
+                   {selectedSong && (
+                     <div className="flex items-center gap-2 bg-[#050505] border border-[#27272a] rounded-md p-1.5">
+                       {selectedSong.artwork && <img src={selectedSong.artwork} className="w-8 h-8 rounded object-cover" alt="" />}
+                       <div className="flex-1 min-w-0">
+                         <div className="text-[10px] text-white font-bold truncate">{selectedSong.title}</div>
+                         <div className="text-[9px] text-zinc-500 truncate">{selectedSong.artist} • {selectedSong.genre}</div>
+                       </div>
+                       <button 
+                         onClick={toggleAudioPlayback}
+                         className="w-7 h-7 flex items-center justify-center rounded-full bg-emerald-500/20 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/30 transition"
+                       >
+                         {isPlayingAudio ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3 ml-0.5" />}
+                       </button>
+                     </div>
+                   )}
 
                   <div className="h-10 bg-[#141416] border border-[#27272a] rounded-md relative flex items-center overflow-hidden">
                      <div className="absolute left-10 right-4 h-full bg-emerald-500/10 border-x border-emerald-500/30 flex items-center group cursor-ew-resize">
@@ -1035,7 +1095,7 @@ export default function HomeView({
       </div>
 
     </div>
-    )}
     </>
-  );
+    );
+  };
 }
