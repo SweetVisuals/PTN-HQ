@@ -32,7 +32,7 @@ export default function App() {
   const [accounts, setAccounts] = useState<PostizAccount[]>([]);
   const [scheduledPosts, setScheduledPosts] = useState<ScheduledPost[]>([]);
   const [postizConfig, setPostizConfig] = useState<PostizConfig>({
-    endpoint: "https://api.postiz.com/v1",
+    endpoint: "https://api.postiz.com/public/v1",
     apiKey: "",
     useRealPostiz: false
   });

@@ -1091,11 +1091,11 @@ export default function HomeView({
             </div>
           )}
 
-        </div>
       </div>
-
+    </div>
     </div>
     </>
-    );
-  };
+  )}
+</>
+);
 }
